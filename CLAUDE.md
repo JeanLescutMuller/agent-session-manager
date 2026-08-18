@@ -62,7 +62,3 @@ bash uninstall.sh
 | `install.sh`, `uninstall.sh` | `~/services/claude_session_manager/` | All |
 | Lifecycle hooks | `~/.claude/settings.json` (auto-registered) | All |
 | LaunchAgent plists | `~/Library/LaunchAgents/` | macOS |
-
-## TODO
-
-- **Configurable ignore patterns in csm-settings.json.** The heartbeat session filter (`is_heartbeat_session`) is hardcoded to skip `myclaw-spaces` sessions. This should be a configurable list of ignore patterns (e.g. slug substrings or content markers) in `csm-settings.json`, so users can exclude other spaces without code changes.

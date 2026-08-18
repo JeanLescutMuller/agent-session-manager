@@ -1,6 +1,7 @@
 {
   "local_projects_dir": "~/.claude/projects",
   "local_index_dir": "~/.claude/session-index-local",
+  "ignore_path_substrings": [],
   "remote_ssh_host": "",
   "remote_ssh_user": "",
   "remote_ssh_port": "22",

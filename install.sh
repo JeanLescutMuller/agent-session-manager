@@ -30,7 +30,9 @@ IS_MACOS=$( [[ "$(uname -s)" == "Darwin" ]] && echo true || echo false )
 echo "Installing Claude Session Manager..."
 echo ""
 
-# -- Pre-flight: check fzf ---------------------------------------------------
+# -- Pre-flight: check fzf and python3 ---------------------------------------
+# python3 isn't optional: csm itself is a Python script (see src/csm's shebang),
+# and this installer uses it once to safely edit ~/.claude/settings.json's JSON.
 
 if ! command -v fzf &>/dev/null; then
     echo "ERROR: fzf is required but not installed."
@@ -38,6 +40,16 @@ if ! command -v fzf &>/dev/null; then
         echo "  Install it with: brew install fzf"
     else
         echo "  Install it with your package manager, e.g.: apt install fzf / dnf install fzf / pacman -S fzf"
+    fi
+    exit 1
+fi
+
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 is required but not installed."
+    if $IS_MACOS; then
+        echo "  Install it with: brew install python3"
+    else
+        echo "  Install it with your package manager, e.g.: apt install python3 / dnf install python3 / pacman -S python"
     fi
     exit 1
 fi

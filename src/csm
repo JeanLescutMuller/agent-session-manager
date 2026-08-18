@@ -89,14 +89,19 @@ SETTINGS_PATH = os.path.join(HOME, ".claude", "csm-settings.json")
 
 def _load_settings() -> Dict[str, Any]:
     """Load CSM settings from ~/.claude/csm-settings.json with defaults."""
-    defaults = {
+    defaults: Dict[str, Any] = {
         "local_projects_dir": "~/.claude/projects",
         "local_index_dir": "~/.claude/session-index-local",
+        "ignore_path_substrings": [],
     }
     try:
         with open(SETTINGS_PATH) as f:
             user = json.load(f)
-        defaults.update({k: v for k, v in user.items() if isinstance(v, str) and v != ""})
+        for k, v in user.items():
+            if isinstance(v, str) and v != "":
+                defaults[k] = v
+            elif isinstance(v, list) and k == "ignore_path_substrings":
+                defaults[k] = [s for s in v if isinstance(s, str) and s]
     except (OSError, json.JSONDecodeError):
         pass
     return defaults
@@ -105,6 +110,7 @@ _SETTINGS = _load_settings()
 
 PROJECTS_DIR = os.path.expanduser(_SETTINGS["local_projects_dir"])
 LOCAL_INDEX_DIR = os.path.expanduser(_SETTINGS["local_index_dir"])
+IGNORE_PATH_SUBSTRINGS: List[str] = _SETTINGS.get("ignore_path_substrings", [])
 
 # -- ANSI Colors ------------------------------------------------------------
 
@@ -750,7 +756,7 @@ def decode_slug_to_path(slug: str, verbose: bool = False) -> Optional[str]:
                 return result
         else:
             # Right after a / (no component yet)
-            # Could be start of a dotfile (e.g., /.myclaw encoded as --myclaw)
+            # Could be start of a dotfile (e.g., /.config encoded as --config)
             for prefix in (".", "_", "-"):
                 result = recurse(pos + 1, current_path, prefix)
                 if result:
@@ -848,18 +854,13 @@ def scan_index_dir(index_dir: str) -> Dict[str, float]:
     return d
 
 
-def is_heartbeat_session(jsonl_path: str) -> bool:
-    """True if this is a myclaw heartbeat session."""
-    if "myclaw-spaces" not in jsonl_path:
-        return False
-    try:
-        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if "Read ./HEARTBEAT.md if it exists" in line:
-                    return True
-    except (OSError, IOError):
-        pass
-    return False
+def is_ignored_session(jsonl_path: str) -> bool:
+    """True if jsonl_path matches any configured ignore_path_substrings entry.
+
+    Lets users exclude sessions from specific tools/directories (e.g. an
+    automated agent's own working space) without a code change - configure
+    `ignore_path_substrings` in ~/.claude/csm-settings.json."""
+    return any(s in jsonl_path for s in IGNORE_PATH_SUBSTRINGS)
 
 
 def index_one(jsonl_path: str, idx_path: str) -> Tuple[str, str]:
@@ -930,7 +931,7 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
 
     # -- Step 3a: Decide what needs reindexing ------------------------
     l_to_reindex: List[Tuple[str, str]] = []  # [(jsonl_path, idx_path), ...]
-    skipped = heartbeat = duplicates = 0
+    skipped = ignored = duplicates = 0
     seen_uuids: set = set()
 
     for jsonl_path, jsonl_mtime in d_history.items():
@@ -942,8 +943,8 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
             continue
         seen_uuids.add(uuid)
 
-        if is_heartbeat_session(jsonl_path):
-            heartbeat += 1
+        if is_ignored_session(jsonl_path):
+            ignored += 1
             continue
 
         idx_path_str = d_uuid_to_idx.get(uuid)
@@ -969,7 +970,7 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
 
     total_scanned = len(seen_uuids)
     n_to_reindex = len(l_to_reindex)
-    print(f"  Step 3a: {total_scanned} sessions scanned, {n_to_reindex} to reindex, {skipped} up to date, {heartbeat} heartbeat, {duplicates} duplicates", flush=True)
+    print(f"  Step 3a: {total_scanned} sessions scanned, {n_to_reindex} to reindex, {skipped} up to date, {ignored} ignored, {duplicates} duplicates", flush=True)
 
     # -- Step 3b: Reindex in parallel with [i/N] progress ------------
     now_mtime = time.time()
@@ -1199,7 +1200,7 @@ Examples:
   csm resume
   csm resume profiling hallucination
   csm resume -f 30 cai benchmarking
-  csm resume --host devvm35601
+  csm resume --host myserver
   csm resume --state pending
   csm resume --fork                # fork instead of resume
   csm resume --max-scan 200

@@ -48,17 +48,17 @@ The JSON index stores structured metadata for every session: conversation messag
 
 | Feature | Native `/resume` | csm |
 |---|---|---|
-| Interactive picker | Yes (built-in) | Yes (fzf) |
-| Search by title | Yes (picker filter) | Yes |
-| Search by conversation content | No | Yes (full-text keyword search) |
-| See sessions from other directories | No | Yes |
-| Resume from a different directory | No | Yes (auto-cd to original dir) |
-| See sessions from other machines | No | Yes (optional SSH sync) |
-| LLM-generated titles | No (only user-set names) | Yes, if the autoname plugin is installed (skipped gracefully otherwise) |
-| Hostname/date filtering | No | Yes |
-| Session state tracking | No | Yes (pending/exited) |
-| Prompt/character analytics | No | Yes (full conversation stored in JSON index) |
-| Fuzzy search fallback | No | Yes |
+| Interactive picker | ✅ Yes (built-in) | ✅ Yes (fzf) |
+| Search by title | ✅ Yes (picker filter) | ✅ Yes |
+| Search by conversation content | ❌ No | ✅ Yes (full-text keyword search) |
+| See sessions from other directories | ❌ No | ✅ Yes |
+| Resume from a different directory | ❌ No | ✅ Yes (auto-cd to original dir) |
+| See sessions from other machines | ❌ No | ✅ Yes (optional SSH sync) |
+| LLM-generated titles | ❌ No (only user-set names) | ✅ Yes, if the autoname plugin is installed (skipped gracefully otherwise) |
+| Hostname/date filtering | ❌ No | ✅ Yes |
+| Session state tracking | ❌ No | ✅ Yes (pending/exited) |
+| Prompt/character analytics | ❌ No | ✅ Yes (full conversation stored in JSON index) |
+| Fuzzy search fallback | ❌ No | ✅ Yes |
 
 ## How It Works
 
@@ -83,25 +83,49 @@ csm registers Claude Code hooks for `SessionStart` and `SessionEnd` events. Thes
 
 ## Usage
 
+### `csm resume` - find and resume a past session
+
 ```bash
-# Search across all local sessions, all directories
-csm resume profiling hallucination
+csm resume                          # browse recent sessions, no keywords
+csm resume profiling hallucination  # full-text keyword search (fuzzy fallback if no exact match)
 
-# Browse recent sessions (no keywords)
-csm resume
+# Filters
+csm resume --host myserver          # only sessions from a given hostname
+csm resume --state pending          # pending (no matching SessionEnd yet) or exited
+csm resume -f 30                    # only active in the last 30 days (default: 90)
+csm resume -u 7                     # only active more than 7 days ago
+csm resume --max-scan 200           # recent sessions scanned when no keywords given (default: 50)
 
-# Filter by hostname
-csm resume --host devvm35601
+# Resume behavior
+csm resume --fork                   # fork into a new session instead of resuming in place
+csm resume -v                       # verbose logging (timestamps on stderr)
+```
 
-# Filter by date range (last 7 days)
-csm resume -f 7
+### `csm reindex` - rebuild the local JSON index
 
-# Rebuild the index (normally runs on a schedule)
-csm reindex
+```bash
+csm reindex                # incremental: only sessions changed since the last index
+csm reindex -n 5           # cap at 5 sessions this run
+csm reindex --force        # reindex everything + retry title generation on orphaned entries
+csm reindex --uuid <uuid>  # reindex a single session (what the SessionEnd hook calls internally)
+```
 
-# Sync with the configured remote (optional, no-op if unconfigured)
-csm-sync
-csm-sync --check   # dry run
+### `csm-sync` - optional cross-machine sync (no-op if no remote is configured)
+
+```bash
+csm-sync                 # bidirectional sync, all sessions
+csm-sync <uuid>           # sync a single session
+csm-sync --push [uuid]    # local → remote only
+csm-sync --pull [uuid]    # remote → local only
+csm-sync --check [uuid]   # dry run - report what would sync, without copying
+```
+
+### Other
+
+```bash
+csm --version   # show version
+csm --help      # show all flags
+! status        # (from inside Claude Code) current session's title, tokens, cost, model
 ```
 
 ## Installation
@@ -114,7 +138,22 @@ bash install.sh
 
 Installs `csm`, `csm-sync`, and `status` to `~/.local/bin/`, registers the `SessionStart`/`SessionEnd` lifecycle hooks in `~/.claude/settings.json`, installs the `/inject` skill, and (on macOS) sets up a `launchd` job for scheduled reindexing. Requires `fzf`. If `~/.local/bin` isn't already on your `$PATH`, `install.sh` will tell you.
 
-To enable cross-machine sync, edit `~/.claude/csm-settings.json` after install and fill in `remote_ssh_host`, `remote_ssh_user`, `remote_ssh_port`, `remote_projects_dir`, and `remote_index_dir` (the last two are paths **on the remote machine**). Then run the same `install.sh` on the other machine too.
+## Settings (`~/.claude/csm-settings.json`)
+
+Created by `install.sh` on first install, never overwritten afterward. All keys are optional except that sync requires the `remote_ssh_*` ones to be filled in.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `local_projects_dir` | `~/.claude/projects` | Where Claude Code writes session files locally |
+| `local_index_dir` | `~/.claude/session-index-local` | Where `csm reindex` writes the JSON index locally |
+| `ignore_path_substrings` | `[]` | List of substrings; any `.jsonl` whose path contains one is skipped entirely during reindex. Use this to exclude sessions from a specific tool, bot, or scratch directory (e.g. `["/agent-scratch/"]`) without a code change. |
+| `remote_ssh_host` | `""` | VM/devserver hostname or IP. Empty ⇒ `csm-sync` exits silently, sync is fully optional |
+| `remote_ssh_user` | `""` | SSH user on the remote |
+| `remote_ssh_port` | `"22"` | SSH port |
+| `remote_projects_dir` | `~/.claude/projects` | Path **on the remote machine** |
+| `remote_index_dir` | `~/.claude/session-index-local` | Path **on the remote machine** |
+
+To enable cross-machine sync, fill in the `remote_ssh_*` keys and run the same `install.sh` on the other machine too.
 
 ## Important: Extend Session Retention
 

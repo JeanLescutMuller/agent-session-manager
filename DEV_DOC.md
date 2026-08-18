@@ -155,7 +155,8 @@ Optionally: confirm by checking whether the PID recorded in the `start` event is
 
 Runs on a schedule. Scans all local session files and writes the local JSON index. Purely local - never touches the network.
 
-- For each `<uuid>.jsonl` in any subfolder of `~/.claude/projects/`, check if `~/.claude/session-index-local/<uuid>.json` exists and has a newer mtime than the `.jsonl`
+- For each `<uuid>.jsonl` in any subfolder of `~/.claude/projects/`, first check it against `ignore_path_substrings` (`~/.claude/csm-settings.json`) - if the path matches, skip it entirely, before any mtime comparison
+- Otherwise, check if `~/.claude/session-index-local/<uuid>.json` exists and has a newer mtime than the `.jsonl`
 - If yes: skip
 - If no: read the `.jsonl` and the corresponding `.lifecycle.jsonl` (if present), extract fields, write `<uuid>.json` to the index folder
 - Writes are atomic (write to temp file, then rename) to avoid partial reads by `csm resume`
