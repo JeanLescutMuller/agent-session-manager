@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.csm.reindex</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CSM_BIN__</string>
+    <string>reindex</string>
+  </array>
+
+  <!-- Run every 30 minutes (1800 seconds) -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/csm-reindex.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/csm-reindex.err</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

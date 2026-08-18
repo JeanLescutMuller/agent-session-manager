@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# uninstall.sh - Claude Session Manager
+#
+# Removes all installed CSM artifacts. Does NOT touch:
+#   - This source folder
+#   - Session history (.jsonl files in ~/.claude/projects/)
+#   - Index files (~/.claude/session-index-local/)
+#
+# Run: bash uninstall.sh   (from the repo root)
+# Or:  ~/services/claude_session_manager/uninstall.sh
+
+set -euo pipefail
+
+SERVICE_DIR="$HOME/services/claude_session_manager"
+IS_MACOS=$( [[ "$(uname -s)" == "Darwin" ]] && echo true || echo false )
+
+echo "Uninstalling Claude Session Manager..."
+echo ""
+
+# -- Unload and remove LaunchAgents (macOS only) -----------------------------
+
+if $IS_MACOS; then
+    LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+    for plist in com.csm.reindex; do
+        plist_path="$LAUNCH_AGENTS/$plist.plist"
+        if [ -f "$plist_path" ]; then
+            launchctl unload "$plist_path" 2>/dev/null || true
+            rm "$plist_path"
+            echo "  Removed $plist_path"
+        fi
+    done
+fi
+
+# -- Remove csm, csm-sync, status --------------------------------------------
+
+BIN_DIR="$HOME/.local/bin"
+for bin in csm csm-sync status; do
+    if [ -f "$BIN_DIR/$bin" ]; then
+        rm "$BIN_DIR/$bin"
+        echo "  Removed $BIN_DIR/$bin"
+    fi
+done
+
+# -- Remove inject skill -------------------------------------------------------
+
+if [ -d "$HOME/.claude/skills/inject" ]; then
+    rm -rf "$HOME/.claude/skills/inject"
+    echo "  Removed ~/.claude/skills/inject/"
+fi
+
+# -- Remove info skill ---------------------------------------------------------
+
+if [ -d "$HOME/.claude/skills/info" ]; then
+    rm -rf "$HOME/.claude/skills/info"
+    echo "  Removed ~/.claude/skills/info/"
+fi
+
+# -- Remove lifecycle hooks from settings.json ------------------------------
+
+SETTINGS_JSON="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS_JSON" ] && command -v python3 &>/dev/null; then
+    python3 - "$SETTINGS_JSON" <<'PYEOF'
+import json, sys
+
+settings_path = sys.argv[1]
+with open(settings_path) as f:
+    settings = json.load(f)
+
+hooks = settings.get("hooks", {})
+changed = False
+for event_key, identifier in [
+    ("SessionStart", "lifecycle_generation"),
+    ("SessionEnd", "lifecycle_generation"),
+]:
+    existing = hooks.get(event_key, [])
+    filtered = [
+        g for g in existing
+        if not any(identifier in h.get("command", "") for h in g.get("hooks", []))
+    ]
+    if len(filtered) != len(existing):
+        changed = True
+        if filtered:
+            hooks[event_key] = filtered
+        else:
+            del hooks[event_key]
+
+if changed:
+    if not hooks:
+        del settings["hooks"]
+    with open(settings_path, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+PYEOF
+    echo "  Removed lifecycle hooks from $SETTINGS_JSON"
+fi
+
+# -- Remove service directory -----------------------------------------------
+
+if [ -d "$SERVICE_DIR" ]; then
+    rm -rf "$SERVICE_DIR"
+    echo "  Removed $SERVICE_DIR"
+fi
+
+echo ""
+echo "Done. Index files and session history were preserved."
+echo ""
+echo "To also remove the local index (optional):"
+echo "  rm -rf ~/.claude/session-index-local/"

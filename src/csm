@@ -1,0 +1,1236 @@
+#!/usr/bin/env python3
+"""
+csm - Claude Session Manager (Pure Python, local index)
+
+Index architecture:
+  reindex → builds JSON index from local .jsonl files (~/.claude/session-index-local/)
+  resume  → reads from local index for fast disk I/O
+
+Commands:
+  csm resume [OPTIONS] [KEYWORD...]   Find and resume a past Claude Code session
+  csm reindex                         Re-index all sessions now
+
+  csm --version                       Show version
+  csm --help                          Show this help
+"""
+
+import sys
+import os
+import re
+import json
+import glob
+import argparse
+import subprocess
+import shlex
+import shutil
+import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple, Any
+
+VERSION = "v4.2"
+HOME = os.path.expanduser("~")
+_CLAUDE_ENV = {**os.environ, "PATH": f"{HOME}/.local/bin:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+
+# -- Autoname (title generation delegated to autoname plugin) --------------
+
+_autoname_script: Optional[str] = None
+
+
+def _find_autoname_script() -> Optional[str]:
+    global _autoname_script
+    if _autoname_script is not None:
+        return _autoname_script if _autoname_script else None
+    matches = glob.glob(os.path.join(HOME, ".claude", "plugins", "cache",
+                                     "claude-templates", "autoname", "*",
+                                     "scripts", "session-autoname.py"))
+    _autoname_script = matches[0] if matches else ""
+    return _autoname_script if _autoname_script else None
+
+
+_autoname_missing_warned = False
+
+
+def _run_autoname(mode: str, target_path: str, overwrite: str = "nothing", source: str = "reindex") -> Tuple[Optional[str], int]:
+    """Call session-autoname.py to generate a title.
+    overwrite: "nothing" (fill), "llm_only" (refresh auto titles), "all" (overwrite everything).
+    Returns (stdout_text, exit_code). Exit 0=success, 1=error, 2=skipped.
+
+    Title generation is optional: if the autoname plugin isn't installed,
+    reindexing must still complete (titles just fall back to untitled)."""
+    global _autoname_missing_warned
+    script = _find_autoname_script()
+    if not script:
+        if not _autoname_missing_warned:
+            _autoname_missing_warned = True
+            print("  NOTE: autoname plugin not installed - skipping title generation", file=sys.stderr)
+        return None, 2
+    cmd = ["python3", script, f"--{mode}", target_path, "--source", source]
+    if overwrite != "nothing":
+        cmd.extend(["--overwrite", overwrite])
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+            stdin=subprocess.DEVNULL, env=_CLAUDE_ENV,
+        )
+        return result.stdout.strip(), result.returncode
+    except subprocess.TimeoutExpired:
+        return None, 1
+    except Exception:
+        return None, 1
+
+
+# -- Settings --------------------------------------------------------------
+
+SETTINGS_PATH = os.path.join(HOME, ".claude", "csm-settings.json")
+
+def _load_settings() -> Dict[str, Any]:
+    """Load CSM settings from ~/.claude/csm-settings.json with defaults."""
+    defaults = {
+        "local_projects_dir": "~/.claude/projects",
+        "local_index_dir": "~/.claude/session-index-local",
+    }
+    try:
+        with open(SETTINGS_PATH) as f:
+            user = json.load(f)
+        defaults.update({k: v for k, v in user.items() if isinstance(v, str) and v != ""})
+    except (OSError, json.JSONDecodeError):
+        pass
+    return defaults
+
+_SETTINGS = _load_settings()
+
+PROJECTS_DIR = os.path.expanduser(_SETTINGS["local_projects_dir"])
+LOCAL_INDEX_DIR = os.path.expanduser(_SETTINGS["local_index_dir"])
+
+# -- ANSI Colors ------------------------------------------------------------
+
+RESET = "\033[0m"
+C_DIR = "\033[38;5;240m"
+HOST_SHADES = [
+    "\033[38;5;33m", "\033[38;5;39m", "\033[38;5;45m",
+    "\033[38;5;75m", "\033[38;5;81m", "\033[38;5;69m",
+]
+
+
+# -- Utilities --------------------------------------------------------------
+
+def log_verbose(msg: str, verbose: bool = False) -> None:
+    """Print message to stderr with timestamp if verbose."""
+    if verbose:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] {msg}", file=sys.stderr)
+
+
+def _make_portable_jsonl_path(abs_path: str) -> str:
+    """Convert absolute jsonl_path to portable ~/.claude/projects/... format.
+
+    $HOME differs across machines (e.g. /Users/alice on a laptop vs
+    /home/bob on a VM), and index files can be copied between machines
+    by csm-sync. Normalizing to ~/.claude/projects/<slug>/<file> makes the
+    path resolve correctly under whichever machine's $HOME reads it.
+    """
+    marker = "/.claude/projects/"
+    idx = abs_path.find(marker)
+    if idx != -1:
+        return "~/.claude/projects/" + abs_path[idx + len(marker):]
+    home = os.path.expanduser("~")
+    if abs_path.startswith(home + "/"):
+        return "~/" + abs_path[len(home) + 1:]
+    return abs_path
+
+
+def _resolve_jsonl_path(stored_path: str) -> str:
+    """Resolve a stored jsonl_path (possibly with ~) to an absolute path."""
+    if stored_path.startswith("~/"):
+        return os.path.expanduser(stored_path)
+    return stored_path
+
+
+# -- JSON Index Writer -----------------------------------------------------
+
+def write_json_atomic(doc: Dict[str, Any], json_path: str) -> None:
+    """Write JSON to temp file then rename (atomic on POSIX)."""
+    Path(json_path).parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(Path(json_path).parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, json_path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# -- JSONL Parser -----------------------------------------------------------
+
+def parse_jsonl(jsonl_path: str) -> Dict[str, Any]:
+    """Parse session JSONL file. Returns dict with session metadata."""
+
+    def _extract_text_from_content(content: Any) -> str:
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            l_parts: List[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    l_parts.append(block.get("text", ""))
+            text = "\n".join(p for p in l_parts if p)
+        else:
+            return ""
+        text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<local-command-caveat>.*?</local-command-caveat>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<message\b[^>]*>.*?</message>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<task-notification\b[^>]*>.*?</task-notification>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<command-name>.*?</command-name>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<command-message>.*?</command-message>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<command-args>.*?</command-args>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<local-command-stdout>.*?</local-command-stdout>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<role>.*?</role>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<source_space>.*?</source_space>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<instructions>.*?</instructions>", "", text, flags=re.DOTALL)
+        return text.strip()
+
+    def _is_tool_result_message(entry: Dict[str, Any]) -> bool:
+        content = entry.get("message", {}).get("content", "")
+        if isinstance(content, list):
+            return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+        return False
+
+    session_id: Optional[str] = None
+    custom_title: Optional[str] = None
+    cwd: Optional[str] = None
+    created_at: Optional[str] = None
+    last_active: Optional[str] = None
+    l_messages: List[Dict[str, Any]] = []
+
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = entry.get("type", "")
+
+                if etype == "custom-title":
+                    custom_title = entry.get("customTitle") or custom_title
+                    session_id = entry.get("sessionId") or session_id
+                    continue
+
+                if not session_id:
+                    session_id = entry.get("sessionId")
+                if not cwd:
+                    cwd = entry.get("cwd")
+
+                ts = entry.get("timestamp")
+
+                if etype == "user" and not _is_tool_result_message(entry):
+                    text = _extract_text_from_content(entry.get("message", {}).get("content", ""))
+                    if text:
+                        if created_at is None:
+                            created_at = ts
+                        last_active = ts
+                        l_messages.append({"role": "user", "timestamp": ts, "text": text})
+
+                elif etype == "assistant":
+                    text = _extract_text_from_content(entry.get("message", {}).get("content", ""))
+                    if text:
+                        if created_at is None:
+                            created_at = ts
+                        last_active = ts
+                        l_messages.append({"role": "assistant", "timestamp": ts, "text": text})
+
+    except (OSError, IOError) as e:
+        print(f"  WARNING: could not read {jsonl_path}: {e}", file=sys.stderr)
+
+    return {
+        "session_id": session_id or Path(jsonl_path).stem,
+        "custom_title": custom_title,
+        "cwd": cwd,
+        "created_at": created_at,
+        "last_active": last_active,
+        "messages": l_messages,
+    }
+
+
+def parse_lifecycle(lifecycle_path: str) -> List[Dict[str, Any]]:
+    """Parse lifecycle.jsonl sidecar. Returns list of event dicts."""
+    l_events: List[Dict[str, Any]] = []
+    if not Path(lifecycle_path).exists():
+        return l_events
+    try:
+        with open(lifecycle_path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    l_events.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+    except (OSError, IOError):
+        pass
+    return l_events
+
+
+def _get_resume_metadata(jsonl_path: str) -> Dict[str, Optional[str]]:
+    """Extract permission mode and latest title from a JSONL transcript."""
+    mode = None
+    title = None
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                etype = entry.get("type", "")
+                if etype == "user" and entry.get("permissionMode"):
+                    mode = entry["permissionMode"]
+                elif etype == "custom-title" and entry.get("customTitle"):
+                    title = entry["customTitle"]
+    except (OSError, IOError):
+        pass
+    return {"permission_mode": mode, "custom_title": title}
+
+
+# -- Session Index Building -------------------------------------------------
+
+def build_doc(uuid: str, jsonl_data: Dict[str, Any], lifecycle_events: List[Dict[str, Any]], jsonl_path: str) -> Dict[str, Any]:
+    """Build index document dict for a session."""
+    slug = Path(jsonl_path).parent.name
+
+    def determine_state(last_active_str: Optional[str]) -> str:
+        has_start = any(e.get("event") in ("start", "resume") for e in lifecycle_events)
+        has_end = any(e.get("event") == "end" for e in lifecycle_events)
+        if has_end or not has_start:
+            return "exited"
+        return "pending"
+
+    messages = jsonl_data["messages"]
+
+    if jsonl_data["custom_title"]:
+        custom_title = jsonl_data["custom_title"]
+    elif not any(m["role"] == "user" and m["text"].strip() for m in messages):
+        custom_title = "[Empty session]"
+    else:
+        custom_title = "Untitled session [prompt]"
+    last_active = jsonl_data["last_active"]
+
+    initial_working_dir = jsonl_data["cwd"]
+    if not initial_working_dir:
+        for ev in lifecycle_events:
+            if ev.get("working_dir"):
+                initial_working_dir = ev["working_dir"]
+                break
+
+    initial_hostname = None
+    latest_hostname = None
+    latest_working_dir = None
+    tmux_session = None
+    tmux_window = None
+    tmux_pane = None
+    for ev in lifecycle_events:
+        if ev.get("event") == "start" and initial_hostname is None:
+            initial_hostname = ev.get("hostname") or None
+            tmux_session = ev.get("tmux_session") or None
+            tmux_window = ev.get("tmux_window") or None
+            tmux_pane = ev.get("tmux_pane") or None
+        if ev.get("event") in ("start", "resume"):
+            h = ev.get("hostname") or None
+            if h:
+                latest_hostname = h
+            wd = ev.get("working_dir") or None
+            if wd:
+                latest_working_dir = wd
+
+    session_state = determine_state(last_active)
+
+    return {
+        "csm_version": VERSION,
+        "session_id": uuid,
+        "custom_title": custom_title,
+        "llm_generated_title_raw": None,
+        "llm_title_error": None,
+        "jsonl_path": _make_portable_jsonl_path(jsonl_path),
+        "slug": slug,
+        "initial_working_dir": initial_working_dir,
+        "latest_working_dir": latest_working_dir,
+        "initial_hostname": initial_hostname,
+        "latest_hostname": latest_hostname,
+        "created_at": jsonl_data["created_at"],
+        "last_active": last_active,
+        "session_state": session_state,
+        "tmux_session": tmux_session,
+        "tmux_window": tmux_window,
+        "tmux_pane": tmux_pane,
+        "conversation": [
+            {"role": m["role"], "timestamp": m["timestamp"], "text": m["text"]}
+            for m in messages
+        ],
+    }
+
+
+# -- Session Search ---------------------------------------------------------
+
+def find_sessions(l_keywords: Optional[List[str]], from_days: int, until_days: Optional[int], f_host: str, f_state: str, max_scan: int, verbose: bool = False) -> Tuple[List[Tuple[Dict[str, Any], str]], bool]:
+    """Find matching sessions in index. Returns ([(d_fields, idx_path), ...], fuzzy_flag)."""
+
+    def passes_filters(d_fields: Dict[str, Any]) -> bool:
+        if f_state:
+            missing = d_fields.get("_source_missing", False)
+            if f_state.lower() == "deleted":
+                if not missing:
+                    return False
+            else:
+                if missing:
+                    return False
+                session_state = d_fields.get("session_state", "") or ""
+                if session_state.lower() != f_state.lower():
+                    return False
+        h_initial = d_fields.get("initial_hostname", "") or ""
+        h_latest = d_fields.get("latest_hostname", "") or ""
+        if f_host and f_host.lower() not in h_initial.lower() and f_host.lower() not in h_latest.lower():
+            return False
+        last_active = d_fields.get("last_active", "")
+        if last_active:
+            try:
+                ts = datetime.fromisoformat(last_active.replace("Z", "+00:00"))
+                if cutoff_from and ts < cutoff_from:
+                    return False
+                if cutoff_until and ts > cutoff_until:
+                    return False
+            except (ValueError, TypeError):
+                pass
+        return True
+
+    def all_keywords_match(content: str, fuzzy: bool = False) -> bool:
+        content_lower = content.lower()
+        if not fuzzy:
+            return all(kw.lower() in content_lower for kw in l_keywords)
+        return all(kw[:3].lower() in content_lower for kw in l_keywords)
+
+    def build_searchable(d: Dict[str, Any]) -> str:
+        """Searchable text from meaningful fields only - excludes metadata (csm_version, hostname, session_id, etc.)."""
+        parts = []
+        for key in ("custom_title", "initial_working_dir", "latest_working_dir"):
+            v = d.get(key)
+            if v:
+                parts.append(str(v))
+        for msg in d.get("conversation", []):
+            t = msg.get("text", "")
+            if t:
+                parts.append(t)
+        return "\n".join(parts)
+
+    log_verbose(f"PHASE 1: Python search started", verbose)
+    log_verbose(f"index_dir = {LOCAL_INDEX_DIR}", verbose)
+
+    now = datetime.now(timezone.utc)
+    cutoff_from = now - timedelta(days=from_days) if from_days > 0 else None
+    cutoff_until = now - timedelta(days=int(until_days)) if until_days else None
+
+    l_idx_files = glob.glob(os.path.join(LOCAL_INDEX_DIR, "*.json"))
+    log_verbose(f"PHASE 2: Found {len(l_idx_files)} index files", verbose)
+
+    # Read all index files and parse them
+    l_all: List[Tuple[Dict[str, Any], str, str]] = []  # (d_fields, idx_path, searchable)
+    for idx_path in l_idx_files:
+        try:
+            with open(idx_path, encoding="utf-8", errors="replace") as fh:
+                raw = fh.read()
+            d_fields = json.loads(raw)
+            d_fields["_source_missing"] = is_source_missing(d_fields)
+            if not passes_filters(d_fields):
+                continue
+            searchable = build_searchable(d_fields)
+            l_all.append((d_fields, idx_path, searchable))
+        except Exception as e:
+            log_verbose(f"PHASE 2: ERROR reading {os.path.basename(idx_path)}: {e}", verbose)
+            continue
+
+    # Sort by last_active (most recent first)
+    l_all.sort(key=lambda item: item[0].get("last_active", "") or "", reverse=True)
+    log_verbose(f"PHASE 3: {len(l_all)} sessions after filtering", verbose)
+
+    # Apply max_scan limit (only when no keywords)
+    if not l_keywords:
+        l_all = l_all[:max_scan]
+
+    # Keyword matching with fuzzy fallback
+    l_sessions: List[Tuple[Dict[str, Any], str]] = []
+    fuzzy = False
+
+    for d_fields, idx_path, raw in l_all:
+        if not l_keywords or all_keywords_match(raw):
+            l_sessions.append((d_fields, idx_path))
+
+    if not l_sessions and l_keywords:
+        fuzzy = True
+        log_verbose(f"PHASE 4: Trying fuzzy match...", verbose)
+        for d_fields, idx_path, raw in l_all:
+            if all_keywords_match(raw, fuzzy=True):
+                l_sessions.append((d_fields, idx_path))
+
+    # Rank matched sessions. Title match is the strongest signal.
+    # Within title-matching sessions, prefer most recent (stable sort preserves recency from l_all).
+    # Within non-title-matching sessions, prefer higher TF density.
+    if l_keywords and l_sessions:
+        raw_by_path = {ip: r for _, ip, r in l_all}
+        def rank_key(item: Tuple[Dict[str, Any], str]) -> Tuple[int, float]:
+            d, idx_path = item
+            title = (d.get("custom_title") or d.get("llm_title") or d.get("auto_title") or "").lower()
+            if all(kw.lower() in title for kw in l_keywords):
+                return (0, 0.0)  # title match: stable sort keeps recency order
+            raw = raw_by_path.get(idx_path, "")
+            n_tokens = len(raw.split()) or 1
+            hits = sum(raw.lower().count(kw.lower()) for kw in l_keywords)
+            return (1, -hits / n_tokens)
+        l_sessions.sort(key=rank_key)
+
+    log_verbose(f"PHASE 5: {len(l_sessions)} sessions matched (fuzzy={fuzzy})", verbose)
+
+    return l_sessions, fuzzy
+
+
+# -- Source JSONL Check -----------------------------------------------------
+
+def is_source_missing(d_fields: Dict[str, Any]) -> bool:
+    """Check if the source .jsonl file has been deleted from disk."""
+    jsonl_path = d_fields.get("jsonl_path", "")
+    if not jsonl_path:
+        return True
+    return not os.path.exists(_resolve_jsonl_path(jsonl_path))
+
+
+# -- Session Display & Selection --------------------------------------------
+
+def format_session_for_fzf(d_fields: Dict[str, Any], idx_path: str, l_keywords: Optional[List[str]]) -> str:
+    """Format session for fzf display."""
+
+    def _clean_field(v: Any) -> Optional[str]:
+        return None if (v is None or (s := str(v).strip()) in ("", "null", "?")) else s
+
+    def time_ago(ts_str: Optional[str]) -> str:
+        if not ts_str:
+            return " " * 10
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            secs = max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
+            if secs < 60:
+                return f"{secs:2d} sec ago"
+            mins = secs // 60
+            if mins < 60:
+                return f"{mins:2d} min ago"
+            hours = mins // 60
+            if hours < 24:
+                return f"{hours:2d} hou ago"
+            return ts.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return " " * 10
+
+    def extract_snippet(l_conv: List[Dict[str, Any]], l_kw: Optional[List[str]] = None, max_chars: int = 120) -> str:
+        for msg in l_conv:
+            text = msg.get("text", "").replace("\n", " ").strip()
+            if not text:
+                continue
+            if l_kw:
+                if any(kw.lower() in text.lower() for kw in l_kw):
+                    first_kw = next(kw for kw in l_kw if kw.lower() in text.lower())
+                    idx = text.lower().find(first_kw.lower())
+                    start = max(0, idx - 40)
+                    snippet = text[start:start+120].strip()
+                    if start > 0:
+                        snippet = "..." + snippet
+                    if start + 120 < len(text):
+                        snippet += "..."
+                    return f"[{msg.get('role','?')} {(msg.get('timestamp') or '')[:10]}] {snippet}"
+            elif msg.get("role") == "user":
+                return text[:max_chars] + ("..." if len(text) > max_chars else "")
+        return ""
+
+    uuid = d_fields.get("session_id", os.path.basename(idx_path).replace(".json", ""))
+    title = _clean_field(d_fields.get("custom_title")) or uuid
+    state = _clean_field(d_fields.get("session_state")) or "?"
+    host_initial = _clean_field(d_fields.get("initial_hostname"))
+    host_latest = _clean_field(d_fields.get("latest_hostname"))
+    working_dir = _clean_field(d_fields.get("latest_working_dir")) or _clean_field(d_fields.get("initial_working_dir"))
+    last_active_raw = d_fields.get("last_active") or ""
+    l_conv = d_fields.get("conversation", [])
+    snippet = extract_snippet(l_conv, l_keywords) if l_keywords else extract_snippet(l_conv)
+
+    source_missing = d_fields.get("_source_missing", False)
+    has_lifecycle = bool(host_initial)
+    if source_missing:
+        state_label = "Deleted"
+        sc = "\033[38;5;52m"  # dark red
+    elif not has_lifecycle or state == "exited":
+        state_label = "Unknown" if not has_lifecycle else "Exited"
+        sc = "\033[38;5;244m"
+    else:
+        state_label = "Pending"
+        try:
+            ts = datetime.fromisoformat((last_active_raw or "").replace("Z", "+00:00"))
+            mins = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+            sc = ("\033[38;5;82m" if mins < 15 else
+                  "\033[38;5;148m" if mins < 60 else
+                  "\033[33m" if mins < 240 else
+                  "\033[38;5;208m" if mins < 720 else
+                  "\033[38;5;166m")
+        except (ValueError, TypeError):
+            sc = "\033[38;5;208m"
+
+    status_block = f"{sc}[ {state_label:<7} {time_ago(last_active_raw)} ]{RESET}"
+    title_str = f"\033[97m{title}{RESET}"
+
+    host_str = ""
+    display_host = host_latest or host_initial
+    if display_host:
+        shade = HOST_SHADES[hash(display_host) % len(HOST_SHADES)]
+        if host_initial and host_latest and host_initial != host_latest:
+            shade_i = HOST_SHADES[hash(host_initial) % len(HOST_SHADES)]
+            host_str = f"{shade_i}{host_initial.split('.')[0]}{RESET}{C_DIR} → {RESET}{shade}{host_latest.split('.')[0]}{RESET}"
+        else:
+            host_str = f"{shade}{display_host.split('.')[0]}{RESET}"
+
+    dir_str = f"{C_DIR}{working_dir}{RESET}" if working_dir else ""
+    parts = [p for p in [status_block, title_str, host_str, dir_str] if p]
+    display = "  ".join(parts)
+
+    return f"{display}\t{snippet}\t{uuid}"
+
+
+def run_fzf(l_sessions: List[Tuple[Dict[str, Any], str]], l_keywords: Optional[List[str]], verbose: bool = False) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Run fzf picker and return (UUID, d_fields) tuple. Returns (None, None) if cancelled."""
+    if not l_sessions:
+        print("No sessions found.", file=sys.stderr)
+        return None, None
+
+    fzf_input = ""
+    d_uuid_to_fields: Dict[str, Dict[str, Any]] = {}
+    for d_fields, idx_path in l_sessions:
+        uuid = d_fields.get("session_id", "")
+        if uuid:
+            d_uuid_to_fields[uuid] = d_fields
+        fzf_input += format_session_for_fzf(d_fields, idx_path, l_keywords) + "\n"
+
+    preview_cmd = 'printf "%s\\n" {2}'
+    if l_keywords:
+        kw_pat = "|".join(l_keywords)
+        preview_cmd = f"printf '%s\\n' {{2}} | GREP_COLOR='1;31' GREP_COLORS='ms=1;31' grep -iE --color=always '{kw_pat}|$'"
+
+    try:
+        result = subprocess.run(
+            [
+                "fzf",
+                "--ansi",
+                "--delimiter=\t",
+                "--with-nth=1",
+                "--preview", preview_cmd,
+                "--preview-window=down:2:wrap",
+                f"--prompt=[{VERSION}] Resume session: ",
+                "--height=80%",
+                "--layout=reverse",
+                "--no-multi",
+            ],
+            input=fzf_input,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            print("Cancelled.", file=sys.stderr)
+            return None, None
+
+        selected = result.stdout.strip()
+        if not selected:
+            print("No session selected.", file=sys.stderr)
+            return None, None
+
+        uuid = selected.split("\t")[-1]
+        log_verbose(f"UUID selected: {uuid}", verbose)
+        d_fields = d_uuid_to_fields.get(uuid)
+        return uuid, d_fields
+
+    except FileNotFoundError:
+        print("ERROR: fzf not found. Install it with: brew install fzf", file=sys.stderr)
+        return None, None
+
+
+# -- Slug Decoding ---------------------------------------------------------
+
+def decode_slug_to_path(slug: str, verbose: bool = False) -> Optional[str]:
+    """Decode a project folder slug back to a filesystem path.
+
+    Claude Code encodes paths by replacing /, _, and . with -.
+    Since this is lossy, we probe the filesystem to resolve ambiguity:
+    at each - in the slug, try /, _, ., and literal -, checking which
+    path components actually exist as directories on disk.
+
+    Returns the decoded path if a valid directory is found, else None.
+    """
+    if not slug or slug[0] != '-':
+        return None
+
+    raw = slug[1:]  # strip leading - (represents /)
+    if not raw:
+        return "/"
+
+    dir_cache: Dict[str, bool] = {}
+    children_cache: Dict[str, List[str]] = {}
+
+    def isdir(p: str) -> bool:
+        if p not in dir_cache:
+            dir_cache[p] = os.path.isdir(p)
+        return dir_cache[p]
+
+    def get_children(d: str) -> List[str]:
+        if d not in children_cache:
+            try:
+                children_cache[d] = os.listdir(d)
+            except OSError:
+                children_cache[d] = []
+        return children_cache[d]
+
+    def recurse(pos: int, current_path: str, component: str) -> Optional[str]:
+        if pos >= len(raw):
+            if component:
+                full = os.path.join(current_path, component)
+                return full if isdir(full) else None
+            return current_path if isdir(current_path) else None
+
+        ch = raw[pos]
+
+        if ch != '-':
+            return recurse(pos + 1, current_path, component + ch)
+
+        # ch is '-': was originally /, _, ., or literal -
+        if component:
+            # Prune: if no entry in current_path starts with component, stop
+            if not any(c.startswith(component) for c in get_children(current_path)):
+                return None
+
+            # Try / first (most common): end component, descend into directory
+            candidate = os.path.join(current_path, component)
+            if isdir(candidate):
+                result = recurse(pos + 1, candidate, "")
+                if result:
+                    return result
+
+            # Try _
+            result = recurse(pos + 1, current_path, component + "_")
+            if result:
+                return result
+
+            # Try .
+            result = recurse(pos + 1, current_path, component + ".")
+            if result:
+                return result
+
+            # Try literal -
+            result = recurse(pos + 1, current_path, component + "-")
+            if result:
+                return result
+        else:
+            # Right after a / (no component yet)
+            # Could be start of a dotfile (e.g., /.myclaw encoded as --myclaw)
+            for prefix in (".", "_", "-"):
+                result = recurse(pos + 1, current_path, prefix)
+                if result:
+                    return result
+
+        return None
+
+    result = recurse(0, "/", "")
+    log_verbose(f"decode_slug_to_path({slug!r}) -> {result!r}", verbose)
+    return result
+
+
+# -- Working Directory Resolution -------------------------------------------
+
+def resolve_working_dir(slug: str, verbose: bool = False) -> Optional[str]:
+    """Resolve a session's slug to the local working directory for resume.
+
+    Claude --resume requires cd-ing into the directory whose encoded slug
+    matches the folder where the .jsonl lives. This function decodes the
+    slug back to a filesystem path by probing the filesystem.
+
+    For cross-machine resume, it also checks alias slugs in ~/.claude/projects/
+    that resolve to the same real directory (via symlinks).
+    """
+    log_verbose(f"=== WORKING DIR RESOLUTION ===", verbose)
+    log_verbose(f"slug: {slug}", verbose)
+
+    # 1. Try to decode the slug directly (same-machine case)
+    path = decode_slug_to_path(slug, verbose)
+    if path and os.path.isdir(path):
+        log_verbose(f"Direct decode succeeded: {path}", verbose)
+        return path
+
+    # 2. If direct decode failed, try alias slugs that resolve to the same dir
+    slug_path = os.path.join(PROJECTS_DIR, slug)
+    if not os.path.exists(slug_path):
+        log_verbose(f"Slug folder does not exist in projects: {slug_path}", verbose)
+        return None
+
+    target_real = os.path.realpath(slug_path)
+    log_verbose(f"Slug realpath: {target_real}", verbose)
+    log_verbose(f"Scanning alias slugs in {PROJECTS_DIR}", verbose)
+
+    for name in sorted(os.listdir(PROJECTS_DIR)):
+        if name == slug:
+            continue
+        entry = os.path.join(PROJECTS_DIR, name)
+        if not os.path.exists(entry):
+            continue
+        if os.path.realpath(entry) != target_real:
+            continue
+
+        log_verbose(f"  Alias slug {name} resolves to same dir", verbose)
+        path = decode_slug_to_path(name, verbose)
+        if path and os.path.isdir(path):
+            log_verbose(f"  Alias decode succeeded: {path}", verbose)
+            return path
+
+    log_verbose(f"No valid working dir found", verbose)
+    log_verbose(f"=== END WORKING DIR RESOLUTION ===", verbose)
+    return None
+
+
+# -- Indexing Operations ----------------------------------------------------
+
+def scan_history_jsonl() -> Dict[str, float]:
+    """Scan all local .jsonl history files. Returns {path: mtime}."""
+    d: Dict[str, float] = {}
+    projects_dir = Path(PROJECTS_DIR)
+    if not projects_dir.exists():
+        return d
+    for slug_dir in projects_dir.iterdir():
+        if not slug_dir.is_dir():
+            continue
+        try:
+            for f in slug_dir.iterdir():
+                if (f.is_file() and f.suffix == ".jsonl" and
+                    not f.name.endswith(".lifecycle.jsonl") and
+                    not f.name.startswith("agent-")):
+                    d[str(f)] = f.stat().st_mtime
+        except OSError:
+            continue
+    return d
+
+
+def scan_index_dir(index_dir: str) -> Dict[str, float]:
+    """Scan a flat directory of .json index files. Returns {path: mtime}."""
+    d: Dict[str, float] = {}
+    idx_dir = Path(index_dir)
+    if not idx_dir.exists():
+        return d
+    for f in idx_dir.iterdir():
+        if f.is_file() and f.name.endswith(".json"):
+            d[str(f)] = f.stat().st_mtime
+    return d
+
+
+def is_heartbeat_session(jsonl_path: str) -> bool:
+    """True if this is a myclaw heartbeat session."""
+    if "myclaw-spaces" not in jsonl_path:
+        return False
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "Read ./HEARTBEAT.md if it exists" in line:
+                    return True
+    except (OSError, IOError):
+        pass
+    return False
+
+
+def index_one(jsonl_path: str, idx_path: str) -> Tuple[str, str]:
+    """Index a single session. Returns (title, source).
+    source is "existing" if title was in JSONL, "autoname" if generated now, "untitled" if no title."""
+    uuid = Path(jsonl_path).stem
+    lifecycle_path = Path(jsonl_path).parent / f"{uuid}.lifecycle.jsonl"
+
+    jsonl_data = parse_jsonl(jsonl_path)
+    lifecycle_events = parse_lifecycle(lifecycle_path)
+
+    had_title = bool(jsonl_data["custom_title"])
+
+    if not jsonl_data["messages"]:
+        jsonl_data["custom_title"] = "[Empty session]"
+    elif not had_title:
+        title_out, rc = _run_autoname("jsonl", jsonl_path)
+        if rc == 0 and title_out:
+            jsonl_data["custom_title"] = title_out
+
+    doc = build_doc(uuid, jsonl_data, lifecycle_events, jsonl_path)
+    write_json_atomic(doc, idx_path)
+
+    title = doc["custom_title"]
+    if had_title:
+        source = "existing"
+    elif title != "Untitled session [prompt]":
+        source = "autoname"
+    else:
+        source = "untitled"
+    return title, source
+
+
+# -- Commands ---------------------------------------------------------------
+
+
+
+def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "") -> Dict[str, int]:
+    """Build/refresh index JSON files from local JSONL files.
+
+    Step 1: Scan local .jsonl history files → d_history
+    Step 2: Scan local .json index files → d_index
+    Step 3: Decide what to reindex + reindex
+    Step 3c: (force) Retry LLM titles for orphaned index files
+    """
+    mode = "force-reindex" if force else "reindex"
+    if single_uuid:
+        mode = f"reindex --uuid {single_uuid[:8]}"
+    print(f"csm {VERSION} - {mode}" + (f" (max {max_sessions})" if max_sessions else ""), flush=True)
+
+    Path(LOCAL_INDEX_DIR).mkdir(parents=True, exist_ok=True)
+
+    # -- Step 1: Scan local .jsonl history files ----------------------
+    d_history = scan_history_jsonl()
+    if single_uuid:
+        d_history = {p: m for p, m in d_history.items() if Path(p).stem == single_uuid}
+    print(f"  Step 1: {len(d_history)} .jsonl history files found", flush=True)
+
+    # -- Step 2: Scan local .json index files -------------------------
+    d_index = scan_index_dir(LOCAL_INDEX_DIR)
+    print(f"  Step 2: {len(d_index)} .json index files in local cache", flush=True)
+
+    # Build lookup: uuid → index path
+    d_uuid_to_idx = {}
+    for idx_path in d_index:
+        uuid = Path(idx_path).stem
+        d_uuid_to_idx[uuid] = idx_path
+
+    # -- Step 3a: Decide what needs reindexing ------------------------
+    l_to_reindex: List[Tuple[str, str]] = []  # [(jsonl_path, idx_path), ...]
+    skipped = heartbeat = duplicates = 0
+    seen_uuids: set = set()
+
+    for jsonl_path, jsonl_mtime in d_history.items():
+        if max_sessions and len(seen_uuids) >= max_sessions:
+            break
+        uuid = Path(jsonl_path).stem
+        if uuid in seen_uuids:
+            duplicates += 1
+            continue
+        seen_uuids.add(uuid)
+
+        if is_heartbeat_session(jsonl_path):
+            heartbeat += 1
+            continue
+
+        idx_path_str = d_uuid_to_idx.get(uuid)
+        idx_mtime = d_index.get(idx_path_str) if idx_path_str else None
+
+        # Decide if reindex is needed
+        needs_reindex = True
+        if not force and idx_mtime is not None:
+            if jsonl_mtime <= idx_mtime:
+                lifecycle_path = Path(jsonl_path).parent / f"{uuid}.lifecycle.jsonl"
+                if lifecycle_path.exists():
+                    if lifecycle_path.stat().st_mtime <= idx_mtime:
+                        needs_reindex = False
+                else:
+                    needs_reindex = False
+
+        if not needs_reindex:
+            skipped += 1
+            continue
+
+        idx_path_final = os.path.join(LOCAL_INDEX_DIR, f"{uuid}.json")
+        l_to_reindex.append((jsonl_path, idx_path_final))
+
+    total_scanned = len(seen_uuids)
+    n_to_reindex = len(l_to_reindex)
+    print(f"  Step 3a: {total_scanned} sessions scanned, {n_to_reindex} to reindex, {skipped} up to date, {heartbeat} heartbeat, {duplicates} duplicates", flush=True)
+
+    # -- Step 3b: Reindex in parallel with [i/N] progress ------------
+    now_mtime = time.time()
+    indexed = errors = 0
+    counter_lock = threading.Lock()
+    progress_counter = [0]  # mutable for closure access
+
+    def _reindex_worker(jsonl_path: str, idx_path_final: str) -> Tuple[str, Optional[Exception], str, str]:
+        """Worker: returns (uuid, exception_or_None, title, source)."""
+        uuid = Path(jsonl_path).stem
+        try:
+            title, source = index_one(jsonl_path, idx_path_final)
+            return (uuid, None, title, source)
+        except Exception as e:
+            return (uuid, e, "", "")
+
+    max_workers = min(10, n_to_reindex) if n_to_reindex > 0 else 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_reindex_worker, jp, ip): (jp, ip)
+            for jp, ip in l_to_reindex
+        }
+        for future in as_completed(futures):
+            jsonl_path, idx_path_final = futures[future]
+            uuid, exc, title, source = future.result()
+
+            with counter_lock:
+                progress_counter[0] += 1
+                i = progress_counter[0]
+
+            if exc is None:
+                indexed += 1
+                d_index[idx_path_final] = now_mtime
+                d_uuid_to_idx[uuid] = idx_path_final
+                freshness = "✨" if source in ("autoname", "untitled") else "📄"
+                if source == "autoname" or (source == "existing" and (
+                    title.endswith("[LLM]") or title.endswith("(auto-generated)"))):
+                    authorship = "🤖"
+                elif source == "untitled":
+                    authorship = "⚠️"
+                else:
+                    authorship = "👤"
+                print(f"    [{i}/{n_to_reindex}] {uuid[:8]}  indexed {freshness}{authorship} {title[:60]}", flush=True)
+            else:
+                errors += 1
+                print(f"    [{i}/{n_to_reindex}] {uuid[:8]}  ERROR: {exc}", file=sys.stderr, flush=True)
+
+    print(f"  Step 3b: indexed={indexed}, errors={errors}")
+
+    # -- Step 3c: (force, all sessions only) Refresh titles for orphaned index files via autoname
+    if force and not single_uuid:
+        d_history_uuids = {Path(p).stem for p in d_history}
+        orphan_idx_files = [
+            (uuid, path) for uuid, path in d_uuid_to_idx.items()
+            if uuid not in d_history_uuids
+        ]
+        if max_sessions:
+            orphan_idx_files = orphan_idx_files[:max_sessions]
+        n_orphans = len(orphan_idx_files)
+        if n_orphans:
+            print(f"  Step 3c: {n_orphans} orphaned index files, refreshing titles via autoname ...", flush=True)
+            refreshed = 0
+
+            def _refresh_worker(uuid: str, idx_path: str) -> Tuple[str, Optional[str], int]:
+                title_out, rc = _run_autoname("index", idx_path)
+                return uuid, title_out, rc
+
+            with ThreadPoolExecutor(max_workers=min(10, n_orphans)) as executor:
+                futures = {
+                    executor.submit(_refresh_worker, u, p): (u, p)
+                    for u, p in orphan_idx_files
+                }
+                for future in as_completed(futures):
+                    uuid, title_out, rc = future.result()
+                    if rc == 0 and title_out:
+                        refreshed += 1
+                        d_index[futures[future][1]] = time.time()
+                        print(f"    {uuid[:8]}  refreshed: {title_out[:60]}", flush=True)
+                    elif rc == 2:
+                        print(f"    {uuid[:8]}  skipped: already titled or autoname unavailable", flush=True)
+                    else:
+                        print(f"    {uuid[:8]}  skipped: autoname error (exit {rc})", flush=True)
+            print(f"  Step 3c: {refreshed}/{n_orphans} titles refreshed")
+        else:
+            print(f"  Step 3c: no orphaned index files")
+
+    return {"sessions_scanned": total_scanned, "sessions_indexed": indexed, "sessions_skipped": skipped, "errors": errors}
+
+
+def cmd_resume(keywords: List[str], from_days: int, until_days: Optional[int], f_host: str, f_state: str, max_scan: int, fork: bool = False, verbose: bool = False) -> None:
+    """Find and resume a session."""
+    if not os.path.isdir(LOCAL_INDEX_DIR):
+        print(f"ERROR: local index cache not found at {LOCAL_INDEX_DIR}", file=sys.stderr)
+        print(f"  Run 'csm reindex' first to build the local cache.", file=sys.stderr)
+        sys.exit(1)
+
+    sessions, fuzzy = find_sessions(keywords, from_days, until_days, f_host, f_state, max_scan, verbose)
+
+    if fuzzy:
+        print("  (no exact matches - showing fuzzy results)", file=sys.stderr)
+
+    uuid, d_fields = run_fzf(sessions, keywords, verbose)
+    if not uuid or not d_fields:
+        sys.exit(0)
+
+    if d_fields.get("_source_missing", False):
+        print(f"\n\033[38;5;208mSession not found locally.\033[0m")
+        print(f"  UUID:  {uuid}")
+        print(f"  Title: {d_fields.get('custom_title', '')}")
+        print(f"  Slug:  {d_fields.get('slug', '')}")
+        print(f"\n  To fetch from remote: csm-sync --pull {uuid}")
+        sys.exit(0)
+
+    slug = d_fields.get("slug", "")
+    initial_wd = d_fields.get("initial_working_dir", "")
+    latest_wd = d_fields.get("latest_working_dir", "")
+    title = d_fields.get("custom_title", "")
+
+    # Read permission mode and latest title from JSONL transcript
+    jsonl_path = _resolve_jsonl_path(d_fields.get("jsonl_path", ""))
+    resume_meta = _get_resume_metadata(jsonl_path) if jsonl_path else {}
+    perm_mode = resume_meta.get("permission_mode")
+    jsonl_title = resume_meta.get("custom_title")
+
+    working_dir = resolve_working_dir(slug, verbose)
+
+    # -- Session info (same format used by /info skill) --
+    print("")
+    # Prefer JSONL title (freshest) over index title
+    title = jsonl_title or title
+    print(f"Title:              {title or '(not set)'}")
+    print(f"UUID:               {uuid}")
+    print(f"Original WD:        {initial_wd}")
+    print(f"Latest WD:          {latest_wd or initial_wd}")
+    print(f"JSONL file:         {jsonl_path or '(unknown)'}")
+    print(f"Permission mode:    {perm_mode or '(unknown)'}")
+    print(f"Selected local dir: {working_dir or '(none)'}")
+
+    # Always build and show the resume command
+    resume_arg = subprocess.list2cmdline([uuid])
+    if working_dir and os.path.isdir(working_dir):
+        claude_flags = "--dangerously-skip-permissions " if perm_mode == "bypassPermissions" else ""
+        cmd = f"cd {subprocess.list2cmdline([working_dir])} && claude {claude_flags}--resume {resume_arg}"
+        if fork:
+            cmd += " --fork-session"
+
+        # Always set TUI header via /rename as the initial prompt.
+        # Warnings are handled separately by the lifecycle_generation.sh hook via additionalContext.
+        display_title = jsonl_title or title or d_fields.get("llm_title", "") or d_fields.get("auto_title", "")
+        if display_title:
+            clean_title = re.sub(r'\s*(\[(LLM|prompt)\]|\(auto-generated\))\s*$', '', display_title)
+            cmd += f" {shlex.quote('/rename ' + clean_title)}"
+
+        print(f"Command:            {cmd}")
+        print("")
+
+        action = "Forking" if fork else "Resuming"
+        print(f"{action} in {working_dir} ...")
+        os.execv("/bin/bash", ["/bin/bash", "-c", cmd])
+    else:
+        print(f"Command:            (cannot resume, directory not found)")
+        print("")
+        print(f"\033[33mWARNING: no accessible directory found for slug: {slug}\033[0m")
+        print(f"  Original dir: {initial_wd}")
+        print("")
+        print("True resume is not possible from here.")
+        print(f"Open Claude and run: /inject {uuid}")
+        print("")
+
+
+# -- Main -------------------------------------------------------------------
+
+def main() -> None:
+    """Main entry point."""
+    parser = argparse.ArgumentParser(prog="csm", add_help=False)
+    subparsers = parser.add_subparsers(dest="command")
+
+    resume_parser = subparsers.add_parser("resume", help="Find and resume a past session")
+    resume_parser.add_argument("-f", "--from-days-ago", type=int, default=90, help="Only sessions active in last N days (default: 90)")
+    resume_parser.add_argument("-u", "--until-days-ago", type=int, help="Only sessions active more than N days ago")
+    resume_parser.add_argument("--host", default="", help="Filter by hostname")
+    resume_parser.add_argument("--state", default="", help="Filter by session state (pending, exited, deleted)")
+    resume_parser.add_argument("--max-scan", type=int, default=50, help="Max recent files to scan without keywords (default: 50)")
+    resume_parser.add_argument("--fork", action="store_true", help="Fork the session instead of resuming it")
+    resume_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+    resume_parser.add_argument("keywords", nargs="*", help="Keywords to search for")
+
+    reindex_parser = subparsers.add_parser("reindex", help="Re-index all sessions now")
+    reindex_parser.add_argument("-n", "--max", type=int, default=0, help="Max sessions to process (0 = unlimited, default: 0)")
+    reindex_parser.add_argument("--force", action="store_true", help="Force reindex all sessions + retry LLM titles for orphaned index files")
+    reindex_parser.add_argument("--uuid", default="", help="Reindex a single session by UUID")
+
+    parser.add_argument("--version", action="store_true", help="Show version")
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help")
+
+    args = parser.parse_args()
+
+    if args.help or (not args.command and not args.version):
+        print(f"""csm {VERSION} - Claude Session Manager (local index)
+
+  reindex → builds JSON index from local .jsonl files
+  resume  → reads from local index (~/.claude/session-index-local/) for fast I/O
+
+Usage:
+  csm resume [OPTIONS] [KEYWORD...]   Find and resume a past session
+  csm reindex [OPTIONS]               Re-index all sessions
+
+  csm --version                       Show version
+  csm --help                          Show this help
+
+Options for 'csm reindex':
+  -n, --max N             Max sessions to process (0 = unlimited, default: 0)
+  --force                 Force reindex all + retry LLM titles for deleted sessions
+  --uuid UUID             Reindex a single session by UUID
+
+Options for 'csm resume':
+  -f, --from-days-ago N   Only sessions active in the last N days (default: 90)
+  -u, --until-days-ago N  Only sessions active more than N days ago
+  --host H                Filter by hostname
+  --state S               Filter by session state (pending, exited, deleted)
+  --max-scan N            Max recent files to scan without keywords (default: 50)
+  --fork                  Fork the session (new session with same history)
+  -v, --verbose           Enable verbose logging with timestamps
+  -h, --help              Show this help
+
+Examples:
+  csm resume
+  csm resume profiling hallucination
+  csm resume -f 30 cai benchmarking
+  csm resume --host devvm35601
+  csm resume --state pending
+  csm resume --fork                # fork instead of resume
+  csm resume --max-scan 200
+  csm resume -v               # with verbose logging
+  csm reindex
+  csm reindex -n 5         # reindex at most 5 sessions
+  csm reindex --force      # force reindex + fix orphan titles
+""", file=sys.stderr)
+        sys.exit(0 if args.help else 1)
+
+    if args.version:
+        print(f"csm {VERSION}")
+        sys.exit(0)
+
+    if args.command == "resume":
+        cmd_resume(
+            args.keywords,
+            args.from_days_ago,
+            args.until_days_ago,
+            args.host,
+            args.state,
+            args.max_scan,
+            args.fork,
+            args.verbose
+        )
+    elif args.command == "reindex":
+        cmd_reindex(args.max, args.force, args.uuid)
+    else:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
