@@ -1,0 +1,6 @@
+[Unit]
+Description=CSM: reindex local Claude Code sessions, then sync with remote
+
+[Service]
+Type=oneshot
+ExecStart=%h/opt/claude_session_manager/csm-reindex-sync.sh

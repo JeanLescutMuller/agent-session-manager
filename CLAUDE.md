@@ -17,21 +17,28 @@ claude-session-manager/
 │
 ├-- src/                    # source files deployed by install.sh
 │   ├-- csm                 # the CLI executable (Python, stdlib only, local-only)
-│   ├-- csm-sync             # optional sync script (Bash, SSH/rsync to a remote host)
-│   ├-- csm-settings.json    # settings template
+│   ├-- csm-sync             # optional sync script (Bash, SSH/rsync to a remote host, index-only)
+│   ├-- csm-reindex-sync.sh  # scheduled-job wrapper: csm reindex, then unconditionally csm-sync
+│   ├-- settings.json        # settings template (deploys to ~/.csm/settings.json)
 │   ├-- status               # standalone session info script
 │   ├-- inject/              # /inject skill for Claude Code
 │   │   └-- SKILL.md
 │   ├-- lifecycle_generation.sh  # session lifecycle hook (cross-platform)
 │   │
-│   ├-- macos/               # macOS-specific: LaunchAgents
-│   │   └-- com.csm.reindex.plist
+│   ├-- macos/               # macOS-specific: LaunchAgent
+│   │   └-- com.csm.reindex-sync.plist
+│   └-- linux/               # Linux-specific: systemd --user unit
+│       ├-- com.csm.reindex-sync.service
+│       └-- com.csm.reindex-sync.timer
 ```
 
 ## Key Concepts
 
-- **Local-first**: `csm` works entirely on local disk. No shared filesystem or mount is assumed. All runtime writes (JSONL, lifecycle) go to `~/.claude/projects/` on local disk.
-- **Optional sync**: `csm-sync` is a separate script that syncs local ↔ a remote host over SSH/rsync (no shared mount required). Uses `cmp` for byte-level conflict detection. Exits silently if not configured.
+- **Local-first**: `csm` works entirely on local disk. No shared filesystem or mount is assumed. Claude Code's own writes (`.jsonl`) go to `~/.claude/projects/`; everything CSM itself owns (index, lifecycle sidecars, settings, sync log) lives under `~/.csm/`.
+- **Optional sync, index-only**: `csm-sync` only ever moves `~/.csm/indexes/*.json` between machines over SSH/rsync - never raw `.jsonl` transcripts or lifecycle sidecars. Newest-`mtime`-wins (index files are always fully regenerated, never hand-appended, so no byte-level conflict resolution is needed). Exits silently if `remote_ssh_host` isn't configured.
+- **Hub and spoke, not mesh**: SSH connections are always initiated by the spoke (a machine with `remote_ssh_host` set); the hub never dials out and leaves that setting empty. Three independent triggers push/pull: the `SessionEnd` hook (single session, background), an opportunistic rate-limited pull at the start of `csm resume`, and a scheduled combined reindex+sync job.
+- **Offline-resilient**: every sync attempt (success or "unreachable") is logged to `~/.csm/sync-log.jsonl`; `csm resume` warns if the last success is stale rather than either crashing offline or searching silently-stale data.
+- **`~/opt/claude_session_manager/` is the canonical deployment location**; `~/.local/bin/{csm,csm-sync,status}` are symlinks into `~/opt/claude_session_manager/bin/`, never real files.
 - **Title pipeline**: custom title (from `/rename`) > autoname plugin (`session-autoname.py`, called during reindex) > "Untitled session" (autoname is optional and skipped gracefully if not installed).
 - **Pure Python, stdlib only**: no pip dependencies. Uses `json`, `pathlib`, `subprocess`, `argparse`.
 - **Mtime-based skip**: only reindexes sessions whose `.jsonl` mtime is newer than the index `.json` mtime.
@@ -43,22 +50,28 @@ claude-session-manager/
 bash install.sh
 
 # Re-install after editing (from deployed copy)
-~/services/claude_session_manager/install.sh
+~/opt/claude_session_manager/install.sh
 
 # Uninstall
 bash uninstall.sh
 ```
 
+`install.sh` is idempotent and self-migrating: re-running it after an older install
+(pre-`~/.csm/` layout) moves `~/.claude/csm-settings.json`, `~/.claude/session-index-local/`,
+and any co-located `*.lifecycle.jsonl` sidecars to the current `~/.csm/` locations
+automatically, fixing up stale path values inside the settings file as it goes.
+
 ## Installed Locations
 
 | Artifact | Destination | Platform |
 |----------|-------------|----------|
-| `csm` | `~/.local/bin/csm` | All |
-| `csm-sync` | `~/.local/bin/csm-sync` | All |
-| `status` | `~/.local/bin/status` | All |
-| `csm-settings.json` | `~/.claude/csm-settings.json` | All |
+| `csm`, `csm-sync`, `status` | `~/opt/claude_session_manager/bin/`, symlinked from `~/.local/bin/` | All |
+| `settings.json` | `~/.csm/settings.json` | All |
+| Index | `~/.csm/indexes/` | All |
+| Lifecycle sidecars | `~/.csm/lifecycles/` | All |
+| Sync log | `~/.csm/sync-log.jsonl` | All |
 | `inject/SKILL.md` | `~/.claude/skills/inject/SKILL.md` | All |
-| `lifecycle_generation.sh` | `~/services/claude_session_manager/` | All |
-| `install.sh`, `uninstall.sh` | `~/services/claude_session_manager/` | All |
+| `lifecycle_generation.sh`, `csm-reindex-sync.sh`, `install.sh`, `uninstall.sh` | `~/opt/claude_session_manager/` | All |
 | Lifecycle hooks | `~/.claude/settings.json` (auto-registered) | All |
-| LaunchAgent plists | `~/Library/LaunchAgents/` | macOS |
+| Scheduled reindex+sync | `~/Library/LaunchAgents/com.csm.reindex-sync.plist` | macOS |
+| Scheduled reindex+sync | `~/.config/systemd/user/com.csm.reindex-sync.{service,timer}` (+ best-effort `loginctl enable-linger`) | Linux |

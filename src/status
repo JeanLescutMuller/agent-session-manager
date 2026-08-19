@@ -62,7 +62,7 @@ def main() -> None:
     jsonl_path = matches[0] if matches else None
 
     # Find index
-    local_idx = os.path.expanduser(f"~/.claude/session-index-local/{sid}.json")
+    local_idx = os.path.expanduser(f"~/.csm/indexes/{sid}.json")
     idx_path = local_idx if os.path.exists(local_idx) else None
 
     # Defaults

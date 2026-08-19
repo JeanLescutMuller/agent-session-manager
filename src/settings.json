@@ -1,10 +1,11 @@
 {
   "local_projects_dir": "~/.claude/projects",
-  "local_index_dir": "~/.claude/session-index-local",
+  "local_index_dir": "~/.csm/indexes",
+  "lifecycle_dir": "~/.csm/lifecycles",
   "ignore_path_substrings": [],
+  "sync_stale_warning_hours": 24,
   "remote_ssh_host": "",
   "remote_ssh_user": "",
   "remote_ssh_port": "22",
-  "remote_projects_dir": "~/.claude/projects",
-  "remote_index_dir": "~/.claude/session-index-local"
+  "remote_index_dir": "~/.csm/indexes"
 }

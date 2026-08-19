@@ -1,11 +1,11 @@
 # Claude Code local tool state - not project content, contains local paths
 .claude/settings.local.json
 
-# Defense in depth: the real settings file lives at ~/.claude/csm-settings.json,
+# Defense in depth: the real settings file lives at ~/.csm/settings.json,
 # outside this repo entirely, and should never be placed here - but ignore it
 # just in case, while still allowing the tracked empty template.
-csm-settings.json
-!src/csm-settings.json
+settings.json
+!src/settings.json
 *.local.json
 .env
 

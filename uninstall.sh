@@ -4,24 +4,24 @@
 # Removes all installed CSM artifacts. Does NOT touch:
 #   - This source folder
 #   - Session history (.jsonl files in ~/.claude/projects/)
-#   - Index files (~/.claude/session-index-local/)
+#   - ~/.csm/ (index, settings, lifecycle sidecars, sync log)
 #
 # Run: bash uninstall.sh   (from the repo root)
-# Or:  ~/services/claude_session_manager/uninstall.sh
+# Or:  ~/opt/claude_session_manager/uninstall.sh
 
 set -euo pipefail
 
-SERVICE_DIR="$HOME/services/claude_session_manager"
+SERVICE_DIR="$HOME/opt/claude_session_manager"
 IS_MACOS=$( [[ "$(uname -s)" == "Darwin" ]] && echo true || echo false )
 
 echo "Uninstalling Claude Session Manager..."
 echo ""
 
-# -- Unload and remove LaunchAgents (macOS only) -----------------------------
+# -- Remove scheduled reindex+sync job ---------------------------------------
 
 if $IS_MACOS; then
     LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-    for plist in com.csm.reindex; do
+    for plist in com.csm.reindex-sync com.csm.reindex; do
         plist_path="$LAUNCH_AGENTS/$plist.plist"
         if [ -f "$plist_path" ]; then
             launchctl unload "$plist_path" 2>/dev/null || true
@@ -29,6 +29,14 @@ if $IS_MACOS; then
             echo "  Removed $plist_path"
         fi
     done
+else
+    SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+    if command -v systemctl &>/dev/null && [ -f "$SYSTEMD_USER_DIR/com.csm.reindex-sync.timer" ]; then
+        systemctl --user disable --now com.csm.reindex-sync.timer 2>/dev/null || true
+        rm -f "$SYSTEMD_USER_DIR/com.csm.reindex-sync.service" "$SYSTEMD_USER_DIR/com.csm.reindex-sync.timer"
+        systemctl --user daemon-reload 2>/dev/null || true
+        echo "  Removed $SYSTEMD_USER_DIR/com.csm.reindex-sync.{service,timer}"
+    fi
 fi
 
 # -- Remove csm, csm-sync, status --------------------------------------------
@@ -102,7 +110,8 @@ if [ -d "$SERVICE_DIR" ]; then
 fi
 
 echo ""
-echo "Done. Index files and session history were preserved."
+echo "Done. ~/.csm/ (index, settings, lifecycle sidecars, sync log) and session"
+echo "history (~/.claude/projects/) were preserved."
 echo ""
-echo "To also remove the local index (optional):"
-echo "  rm -rf ~/.claude/session-index-local/"
+echo "To also remove CSM's own data (optional):"
+echo "  rm -rf ~/.csm/"

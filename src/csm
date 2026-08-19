@@ -3,7 +3,7 @@
 csm - Claude Session Manager (Pure Python, local index)
 
 Index architecture:
-  reindex → builds JSON index from local .jsonl files (~/.claude/session-index-local/)
+  reindex → builds JSON index from local .jsonl files (~/.csm/indexes/)
   resume  → reads from local index for fast disk I/O
 
 Commands:
@@ -85,14 +85,17 @@ def _run_autoname(mode: str, target_path: str, overwrite: str = "nothing", sourc
 
 # -- Settings --------------------------------------------------------------
 
-SETTINGS_PATH = os.path.join(HOME, ".claude", "csm-settings.json")
+SETTINGS_PATH = os.path.join(HOME, ".csm", "settings.json")
 
 def _load_settings() -> Dict[str, Any]:
-    """Load CSM settings from ~/.claude/csm-settings.json with defaults."""
+    """Load CSM settings from ~/.csm/settings.json with defaults."""
     defaults: Dict[str, Any] = {
         "local_projects_dir": "~/.claude/projects",
-        "local_index_dir": "~/.claude/session-index-local",
+        "local_index_dir": "~/.csm/indexes",
+        "lifecycle_dir": "~/.csm/lifecycles",
         "ignore_path_substrings": [],
+        "sync_stale_warning_hours": 24,
+        "remote_ssh_host": "",
     }
     try:
         with open(SETTINGS_PATH) as f:
@@ -102,6 +105,8 @@ def _load_settings() -> Dict[str, Any]:
                 defaults[k] = v
             elif isinstance(v, list) and k == "ignore_path_substrings":
                 defaults[k] = [s for s in v if isinstance(s, str) and s]
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                defaults[k] = v
     except (OSError, json.JSONDecodeError):
         pass
     return defaults
@@ -110,7 +115,10 @@ _SETTINGS = _load_settings()
 
 PROJECTS_DIR = os.path.expanduser(_SETTINGS["local_projects_dir"])
 LOCAL_INDEX_DIR = os.path.expanduser(_SETTINGS["local_index_dir"])
+LIFECYCLE_DIR = os.path.expanduser(_SETTINGS["lifecycle_dir"])
 IGNORE_PATH_SUBSTRINGS: List[str] = _SETTINGS.get("ignore_path_substrings", [])
+SYNC_STALE_WARNING_HOURS: float = _SETTINGS.get("sync_stale_warning_hours", 24)
+SYNC_LOG_PATH = os.path.join(HOME, ".csm", "sync-log.jsonl")
 
 # -- ANSI Colors ------------------------------------------------------------
 
@@ -834,7 +842,6 @@ def scan_history_jsonl() -> Dict[str, float]:
         try:
             for f in slug_dir.iterdir():
                 if (f.is_file() and f.suffix == ".jsonl" and
-                    not f.name.endswith(".lifecycle.jsonl") and
                     not f.name.startswith("agent-")):
                     d[str(f)] = f.stat().st_mtime
         except OSError:
@@ -859,7 +866,7 @@ def is_ignored_session(jsonl_path: str) -> bool:
 
     Lets users exclude sessions from specific tools/directories (e.g. an
     automated agent's own working space) without a code change - configure
-    `ignore_path_substrings` in ~/.claude/csm-settings.json."""
+    `ignore_path_substrings` in ~/.csm/settings.json."""
     return any(s in jsonl_path for s in IGNORE_PATH_SUBSTRINGS)
 
 
@@ -867,7 +874,7 @@ def index_one(jsonl_path: str, idx_path: str) -> Tuple[str, str]:
     """Index a single session. Returns (title, source).
     source is "existing" if title was in JSONL, "autoname" if generated now, "untitled" if no title."""
     uuid = Path(jsonl_path).stem
-    lifecycle_path = Path(jsonl_path).parent / f"{uuid}.lifecycle.jsonl"
+    lifecycle_path = Path(LIFECYCLE_DIR) / f"{uuid}.jsonl"
 
     jsonl_data = parse_jsonl(jsonl_path)
     lifecycle_events = parse_lifecycle(lifecycle_path)
@@ -954,7 +961,7 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
         needs_reindex = True
         if not force and idx_mtime is not None:
             if jsonl_mtime <= idx_mtime:
-                lifecycle_path = Path(jsonl_path).parent / f"{uuid}.lifecycle.jsonl"
+                lifecycle_path = Path(LIFECYCLE_DIR) / f"{uuid}.jsonl"
                 if lifecycle_path.exists():
                     if lifecycle_path.stat().st_mtime <= idx_mtime:
                         needs_reindex = False
@@ -1060,12 +1067,84 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
     return {"sessions_scanned": total_scanned, "sessions_indexed": indexed, "sessions_skipped": skipped, "errors": errors}
 
 
+def _read_sync_log_tail(max_lines: int = 200) -> List[Dict[str, Any]]:
+    """Read up to the last max_lines entries from ~/.csm/sync-log.jsonl."""
+    if not os.path.isfile(SYNC_LOG_PATH):
+        return []
+    try:
+        with open(SYNC_LOG_PATH, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-max_lines:]
+    except OSError:
+        return []
+    entries: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def _maybe_pull_before_resume(verbose: bool = False) -> None:
+    """Opportunistic, rate-limited pull of the remote index before searching.
+
+    Never blocks more than a few seconds and never raises - a failed or timed
+    out pull just means csm resume searches whatever's already local."""
+    entries = _read_sync_log_tail()
+    now = datetime.now(timezone.utc)
+    if entries:
+        try:
+            last_attempt = datetime.fromisoformat(entries[-1]["timestamp"].replace("Z", "+00:00"))
+            if (now - last_attempt).total_seconds() < 60:
+                log_verbose("Skipping opportunistic pull (attempted <60s ago)", verbose)
+                return
+        except (KeyError, ValueError, TypeError):
+            pass
+    try:
+        subprocess.run(
+            ["csm-sync", "--pull"], timeout=5, capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        log_verbose(f"Opportunistic pull skipped: {e}", verbose)
+
+
+def _sync_staleness_warning() -> Optional[str]:
+    """Return a warning string if the last successful sync is stale/missing, else None."""
+    entries = _read_sync_log_tail()
+    last_success = None
+    for entry in reversed(entries):
+        if entry.get("outcome") == "success":
+            try:
+                last_success = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
+            except (KeyError, ValueError, TypeError):
+                pass
+            break
+    if last_success is None:
+        return "never synced with remote yet"
+    age_hours = (datetime.now(timezone.utc) - last_success).total_seconds() / 3600
+    if age_hours <= SYNC_STALE_WARNING_HOURS:
+        return None
+    if age_hours >= 48:
+        return f"last synced with remote {age_hours / 24:.0f}d ago"
+    return f"last synced with remote {age_hours:.0f}h ago"
+
+
 def cmd_resume(keywords: List[str], from_days: int, until_days: Optional[int], f_host: str, f_state: str, max_scan: int, fork: bool = False, verbose: bool = False) -> None:
     """Find and resume a session."""
     if not os.path.isdir(LOCAL_INDEX_DIR):
         print(f"ERROR: local index cache not found at {LOCAL_INDEX_DIR}", file=sys.stderr)
         print(f"  Run 'csm reindex' first to build the local cache.", file=sys.stderr)
         sys.exit(1)
+
+    if _SETTINGS.get("remote_ssh_host", ""):
+        _maybe_pull_before_resume(verbose)
+        warning = _sync_staleness_warning()
+        if warning:
+            print(f"\033[38;5;208m⚠ {warning}\033[0m", file=sys.stderr)
 
     sessions, fuzzy = find_sessions(keywords, from_days, until_days, f_host, f_state, max_scan, verbose)
 
@@ -1172,7 +1251,7 @@ def main() -> None:
         print(f"""csm {VERSION} - Claude Session Manager (local index)
 
   reindex → builds JSON index from local .jsonl files
-  resume  → reads from local index (~/.claude/session-index-local/) for fast I/O
+  resume  → reads from local index (~/.csm/indexes/) for fast I/O
 
 Usage:
   csm resume [OPTIONS] [KEYWORD...]   Find and resume a past session

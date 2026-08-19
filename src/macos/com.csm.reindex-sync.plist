@@ -4,12 +4,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.csm.reindex</string>
+  <string>com.csm.reindex-sync</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>__CSM_BIN__</string>
-    <string>reindex</string>
+    <string>__WRAPPER_SCRIPT__</string>
   </array>
 
   <!-- Run every 30 minutes (1800 seconds) -->
@@ -17,9 +16,9 @@
   <integer>1800</integer>
 
   <key>StandardOutPath</key>
-  <string>__LOG_DIR__/csm-reindex.log</string>
+  <string>__LOG_DIR__/csm-reindex-sync.log</string>
   <key>StandardErrorPath</key>
-  <string>__LOG_DIR__/csm-reindex.err</string>
+  <string>__LOG_DIR__/csm-reindex-sync.err</string>
 
   <key>ProcessType</key>
   <string>Background</string>

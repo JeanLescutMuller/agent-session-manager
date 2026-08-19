@@ -37,7 +37,7 @@ fi
 [[ -z "$SESSION_ID" || -z "$TRANSCRIPT_PATH" ]] && exit 0
 
 # --- Derive sidecar path ---
-SIDECAR_PATH="${TRANSCRIPT_PATH%.jsonl}.lifecycle.jsonl"
+SIDECAR_PATH="$HOME/.csm/lifecycles/${SESSION_ID}.jsonl"
 
 # --- Infer event type ---
 if [[ "$HOOK_EVENT" == "end" ]]; then
