@@ -175,10 +175,12 @@ This must be set on each machine independently.
 
 ## Technical Details
 
-- Pure Python (stdlib only, no pip dependencies) for `csm`; plain Bash for `csm-sync` and the lifecycle hook
+- Pure Python (stdlib only, no pip dependencies) for `csm`; plain Bash for `csm-sync`, the lifecycle hook, and the scheduled `csm-reindex-sync.sh` wrapper
 - Parallel reindexing with 10 concurrent workers
 - Incremental: skips sessions unchanged since last index (mtime comparison)
 - Optional LLM title generation via a separate autoname plugin (skipped gracefully if not installed)
 - Atomic file writes (tempfile + os.replace) for crash safety
 - JSON index format, queryable with `jq` for ad hoc analysis
 - Resume search completes in well under a second from local disk
+- Scheduling uses each platform's native mechanism (`launchd` on macOS, a `systemd --user` timer on Linux) rather than a custom daemon or cron - `install.sh` sets it up, no manual scheduler config needed
+- Every sync attempt (success or failure) is appended to `~/.csm/sync-log.jsonl` as one JSON line - a lightweight audit trail, not just a staleness check

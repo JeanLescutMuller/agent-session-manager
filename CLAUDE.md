@@ -1,6 +1,6 @@
 # Claude Session Manager (CSM)
 
-CLI tool for indexing, searching, and resuming Claude Code sessions across machines.
+CLI tool for indexing, searching, and resuming Claude Code sessions, with optional index-only visibility across machines.
 
 - Requirements and design rationale: `DEV_DOC.md`
 - Installation and day-to-day usage: `README.md`

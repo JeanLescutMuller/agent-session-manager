@@ -48,9 +48,9 @@ def _format_duration(seconds: float) -> str:
 
 
 def main() -> None:
-    sid = os.environ.get("CLAUDE_CODE_CURRENT_SESSION_ID")
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
-        print("Not running inside Claude Code (CLAUDE_CODE_CURRENT_SESSION_ID not set)")
+        print("Not running inside Claude Code (CLAUDE_CODE_SESSION_ID not set)")
         return
 
     hostname = os.uname().nodename

@@ -12,14 +12,14 @@ considered and rejected).
 
 # Part 1: Requirements
 
-A unified tool for tracking, indexing, and resuming Claude Code sessions across
-machines and tmux panes.
+A unified tool for tracking, indexing, and resuming Claude Code sessions, with
+optional index-only visibility across machines.
 
 ## Use Cases
 
 1. **Find and resume a past session by topic**: "I had a session about profiling hallucination rates, what was the slug?" Search by keywords across prompts and get the session instantly.
-2. **Recover from a crash**: Server or tmux dies. Restore all previously running sessions to their original tmux layout (which panes, which working directories, which sessions).
-3. **Migrate sessions across servers**: Before shutting down one machine, answer "what Claude sessions are still running there?" and re-launch them on another.
+2. **Cross-machine visibility**: "I was working on this on my VM earlier - is it visible from my laptop?" Search once, from anywhere, and pull a past session's content into a new conversation via `/inject` - not a true resume (see D2/D3 for why that's out of scope), but enough to pick the work back up without SSH-ing over just to remember what you were doing.
+3. **Spot what's still open**: `csm resume --state pending` across all your machines to see sessions that started but never got a clean `SessionEnd` - not full crash recovery (see R4/R5's implementation status), but the closest thing available today.
 
 ---
 
