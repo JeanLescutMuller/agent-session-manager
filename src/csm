@@ -80,6 +80,19 @@ HOST_SHADES = [
     "\033[38;5;75m", "\033[38;5;81m", "\033[38;5;69m",
 ]
 
+# -- Title source -------------------------------------------------------------
+# custom = set via /rename, ai = Claude Code's native ai-title, empty/untitled
+# = no title available. Shared between the reindex progress log and the
+# csm resume picker so both use the same vocabulary.
+
+TITLE_SOURCE_MARKERS = {"custom": "👤", "ai": "🤖", "empty": "∅", "untitled": "⚠️"}
+TITLE_SOURCE_LABELS = {
+    "custom": "manual (/rename)",
+    "ai": "AI-generated (Claude Code native)",
+    "empty": "n/a (empty session)",
+    "untitled": "none set",
+}
+
 
 # -- Utilities --------------------------------------------------------------
 
@@ -304,12 +317,16 @@ def build_doc(uuid: str, jsonl_data: Dict[str, Any], lifecycle_events: List[Dict
 
     if jsonl_data["custom_title"]:
         custom_title = jsonl_data["custom_title"]
+        title_source = "custom"
     elif jsonl_data.get("ai_title"):
         custom_title = jsonl_data["ai_title"]
+        title_source = "ai"
     elif not any(m["role"] == "user" and m["text"].strip() for m in messages):
         custom_title = "[Empty session]"
+        title_source = "empty"
     else:
         custom_title = "Untitled session [prompt]"
+        title_source = "untitled"
     last_active = jsonl_data["last_active"]
 
     initial_working_dir = jsonl_data["cwd"]
@@ -345,6 +362,7 @@ def build_doc(uuid: str, jsonl_data: Dict[str, Any], lifecycle_events: List[Dict
         "csm_version": VERSION,
         "session_id": uuid,
         "custom_title": custom_title,
+        "title_source": title_source,
         "jsonl_path": _make_portable_jsonl_path(jsonl_path),
         "slug": slug,
         "initial_working_dir": initial_working_dir,
@@ -574,7 +592,10 @@ def format_session_for_fzf(d_fields: Dict[str, Any], idx_path: str, l_keywords: 
             sc = "\033[38;5;208m"
 
     status_block = f"{sc}[ {state_label:<7} {time_ago(last_active_raw)} ]{RESET}"
-    title_str = f"\033[97m{title}{RESET}"
+    title_source = d_fields.get("title_source")
+    marker = TITLE_SOURCE_MARKERS.get(title_source, "")
+    title_str = f"\033[97m{marker + ' ' if marker else ''}{title}{RESET}"
+    source_label = f"Title: {TITLE_SOURCE_LABELS[title_source]}" if title_source in TITLE_SOURCE_LABELS else ""
 
     host_str = ""
     display_host = host_latest or host_initial
@@ -590,7 +611,7 @@ def format_session_for_fzf(d_fields: Dict[str, Any], idx_path: str, l_keywords: 
     parts = [p for p in [status_block, title_str, host_str, dir_str] if p]
     display = "  ".join(parts)
 
-    return f"{display}\t{snippet}\t{uuid}"
+    return f"{display}\t{snippet}\t{source_label}\t{uuid}"
 
 
 def run_fzf(l_sessions: List[Tuple[Dict[str, Any], str]], l_keywords: Optional[List[str]], verbose: bool = False) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -607,10 +628,10 @@ def run_fzf(l_sessions: List[Tuple[Dict[str, Any], str]], l_keywords: Optional[L
             d_uuid_to_fields[uuid] = d_fields
         fzf_input += format_session_for_fzf(d_fields, idx_path, l_keywords) + "\n"
 
-    preview_cmd = 'printf "%s\\n" {2}'
+    preview_cmd = 'printf "%s\\n%s\\n" {3} {2}'
     if l_keywords:
         kw_pat = "|".join(l_keywords)
-        preview_cmd = f"printf '%s\\n' {{2}} | GREP_COLOR='1;31' GREP_COLORS='ms=1;31' grep -iE --color=always '{kw_pat}|$'"
+        preview_cmd = f"printf '%s\\n' {{3}}; printf '%s\\n' {{2}} | GREP_COLOR='1;31' GREP_COLORS='ms=1;31' grep -iE --color=always '{kw_pat}|$'"
 
     try:
         result = subprocess.run(
@@ -620,7 +641,7 @@ def run_fzf(l_sessions: List[Tuple[Dict[str, Any], str]], l_keywords: Optional[L
                 "--delimiter=\t",
                 "--with-nth=1",
                 "--preview", preview_cmd,
-                "--preview-window=down:2:wrap",
+                "--preview-window=down:3:wrap",
                 f"--prompt=[{VERSION}] Resume session: ",
                 "--height=80%",
                 "--layout=reverse",
@@ -845,16 +866,7 @@ def index_one(jsonl_path: str, idx_path: str) -> Tuple[str, str]:
     doc = build_doc(uuid, jsonl_data, lifecycle_events, jsonl_path)
     write_json_atomic(doc, idx_path)
 
-    title = doc["custom_title"]
-    if jsonl_data["custom_title"]:
-        source = "custom"
-    elif jsonl_data.get("ai_title"):
-        source = "ai"
-    elif title == "[Empty session]":
-        source = "empty"
-    else:
-        source = "untitled"
-    return title, source
+    return doc["custom_title"], doc["title_source"]
 
 
 # -- Commands ---------------------------------------------------------------
@@ -967,14 +979,7 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
                 indexed += 1
                 d_index[idx_path_final] = now_mtime
                 d_uuid_to_idx[uuid] = idx_path_final
-                if source == "custom":
-                    marker = "👤"
-                elif source == "ai":
-                    marker = "🤖"
-                elif source == "empty":
-                    marker = "∅"
-                else:
-                    marker = "⚠️"
+                marker = TITLE_SOURCE_MARKERS.get(source, "⚠️")
                 print(f"    [{i}/{n_to_reindex}] {uuid[:8]}  indexed {marker} {title[:60]}", flush=True)
             else:
                 errors += 1
