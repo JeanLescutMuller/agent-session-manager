@@ -66,6 +66,7 @@ def main() -> None:
     idx_path = local_idx if os.path.exists(local_idx) else None
 
     # Defaults
+    ai_title = None
     title = "(not set)"
     model = "(unknown)"
     perm_mode = "(unknown)"
@@ -97,6 +98,8 @@ def main() -> None:
 
                 if etype == "custom-title" and e.get("customTitle"):
                     title = e["customTitle"]
+                elif etype == "ai-title" and e.get("aiTitle"):
+                    ai_title = e["aiTitle"]
                 elif etype == "user" and e.get("subtype") == "local_command" and "/rename" in e.get("content", ""):
                     m = re.search(r"<command-args>(.*?)</command-args>", e["content"])
                     if m:
@@ -117,6 +120,8 @@ def main() -> None:
                     usage = msg.get("usage", {})
                     total_input += usage.get("input_tokens", 0)
                     total_output += usage.get("output_tokens", 0)
+        if title == "(not set)" and ai_title:
+            title = ai_title
     else:
         jsonl_path = "(not found)"
 

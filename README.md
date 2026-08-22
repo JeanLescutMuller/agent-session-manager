@@ -57,7 +57,7 @@ The JSON index stores structured metadata for every session: conversation messag
 | See sessions from other directories | ❌ No | ✅ Yes |
 | Resume from a different directory | ❌ No | ✅ Yes (auto-cd to original dir) |
 | See sessions from other machines | ❌ No | ✅ Yes (optional SSH sync) |
-| LLM-generated titles | ❌ No (only user-set names) | ✅ Yes, if the autoname plugin is installed (skipped gracefully otherwise) |
+| LLM-generated titles | ✅ Yes (native `ai-title`) | ✅ Yes (reads the same native `ai-title`, plus `/rename`) |
 | Hostname/date filtering | ❌ No | ✅ Yes |
 | Session state tracking | ❌ No | ✅ Yes (pending/exited) |
 | Prompt/character analytics | ❌ No | ✅ Yes (full conversation stored in JSON index) |
@@ -178,7 +178,7 @@ This must be set on each machine independently.
 - Pure Python (stdlib only, no pip dependencies) for `csm`; plain Bash for `csm-sync`, the lifecycle hook, and the scheduled `csm-reindex-sync.sh` wrapper
 - Parallel reindexing with 10 concurrent workers
 - Incremental: skips sessions unchanged since last index (mtime comparison)
-- Optional LLM title generation via a separate autoname plugin (skipped gracefully if not installed)
+- Titles come from `/rename` (custom) or Claude Code's own native `ai-title` - no separate title-generation plugin needed
 - Atomic file writes (tempfile + os.replace) for crash safety
 - JSON index format, queryable with `jq` for ad hoc analysis
 - Resume search completes in well under a second from local disk

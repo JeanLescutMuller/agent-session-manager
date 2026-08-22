@@ -56,27 +56,6 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-# -- Pre-flight: check autoname plugin (optional - title generation just --
-# -- gets skipped gracefully if it's not installed) -------------------------
-
-AUTONAME_GLOB="$HOME/.claude/plugins/cache/claude-templates/autoname/*/scripts/session-autoname.py"
-if ! compgen -G "$AUTONAME_GLOB" >/dev/null 2>&1; then
-    if command -v claude-templates &>/dev/null; then
-        echo "  Installing autoname plugin (optional, for LLM title generation)..."
-        claude-templates plugin autoname install 2>&1 | tail -3
-        if compgen -G "$AUTONAME_GLOB" >/dev/null 2>&1; then
-            echo "  autoname plugin installed."
-        else
-            echo "  NOTE: autoname plugin installation failed - title generation will be skipped."
-        fi
-    else
-        echo "  NOTE: autoname plugin not installed - title generation will be skipped."
-        echo "        (optional; install claude-templates and run 'claude-templates plugin autoname install' to enable it)"
-    fi
-else
-    echo "  autoname plugin: already installed"
-fi
-
 # -- One-time migration: ~/.claude/{csm-settings.json,session-index-local,   --
 # -- *.lifecycle.jsonl} -> ~/.csm/ (no-op on a fresh install / already done) --
 

@@ -33,55 +33,6 @@ from typing import Optional, Dict, List, Tuple, Any
 
 VERSION = "v4.2"
 HOME = os.path.expanduser("~")
-_CLAUDE_ENV = {**os.environ, "PATH": f"{HOME}/.local/bin:{os.environ.get('PATH', '/usr/bin:/bin')}"}
-
-# -- Autoname (title generation delegated to autoname plugin) --------------
-
-_autoname_script: Optional[str] = None
-
-
-def _find_autoname_script() -> Optional[str]:
-    global _autoname_script
-    if _autoname_script is not None:
-        return _autoname_script if _autoname_script else None
-    matches = glob.glob(os.path.join(HOME, ".claude", "plugins", "cache",
-                                     "claude-templates", "autoname", "*",
-                                     "scripts", "session-autoname.py"))
-    _autoname_script = matches[0] if matches else ""
-    return _autoname_script if _autoname_script else None
-
-
-_autoname_missing_warned = False
-
-
-def _run_autoname(mode: str, target_path: str, overwrite: str = "nothing", source: str = "reindex") -> Tuple[Optional[str], int]:
-    """Call session-autoname.py to generate a title.
-    overwrite: "nothing" (fill), "llm_only" (refresh auto titles), "all" (overwrite everything).
-    Returns (stdout_text, exit_code). Exit 0=success, 1=error, 2=skipped.
-
-    Title generation is optional: if the autoname plugin isn't installed,
-    reindexing must still complete (titles just fall back to untitled)."""
-    global _autoname_missing_warned
-    script = _find_autoname_script()
-    if not script:
-        if not _autoname_missing_warned:
-            _autoname_missing_warned = True
-            print("  NOTE: autoname plugin not installed - skipping title generation", file=sys.stderr)
-        return None, 2
-    cmd = ["python3", script, f"--{mode}", target_path, "--source", source]
-    if overwrite != "nothing":
-        cmd.extend(["--overwrite", overwrite])
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
-            stdin=subprocess.DEVNULL, env=_CLAUDE_ENV,
-        )
-        return result.stdout.strip(), result.returncode
-    except subprocess.TimeoutExpired:
-        return None, 1
-    except Exception:
-        return None, 1
-
 
 # -- Settings --------------------------------------------------------------
 
@@ -222,6 +173,7 @@ def parse_jsonl(jsonl_path: str) -> Dict[str, Any]:
 
     session_id: Optional[str] = None
     custom_title: Optional[str] = None
+    ai_title: Optional[str] = None
     cwd: Optional[str] = None
     created_at: Optional[str] = None
     last_active: Optional[str] = None
@@ -242,6 +194,11 @@ def parse_jsonl(jsonl_path: str) -> Dict[str, Any]:
 
                 if etype == "custom-title":
                     custom_title = entry.get("customTitle") or custom_title
+                    session_id = entry.get("sessionId") or session_id
+                    continue
+
+                if etype == "ai-title":
+                    ai_title = entry.get("aiTitle") or ai_title
                     session_id = entry.get("sessionId") or session_id
                     continue
 
@@ -274,6 +231,7 @@ def parse_jsonl(jsonl_path: str) -> Dict[str, Any]:
     return {
         "session_id": session_id or Path(jsonl_path).stem,
         "custom_title": custom_title,
+        "ai_title": ai_title,
         "cwd": cwd,
         "created_at": created_at,
         "last_active": last_active,
@@ -302,9 +260,11 @@ def parse_lifecycle(lifecycle_path: str) -> List[Dict[str, Any]]:
 
 
 def _get_resume_metadata(jsonl_path: str) -> Dict[str, Optional[str]]:
-    """Extract permission mode and latest title from a JSONL transcript."""
+    """Extract permission mode and latest title from a JSONL transcript.
+    Title priority: custom title (/rename) > native Claude Code ai-title."""
     mode = None
-    title = None
+    custom_title = None
+    ai_title = None
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as f:
             for raw in f:
@@ -319,10 +279,12 @@ def _get_resume_metadata(jsonl_path: str) -> Dict[str, Optional[str]]:
                 if etype == "user" and entry.get("permissionMode"):
                     mode = entry["permissionMode"]
                 elif etype == "custom-title" and entry.get("customTitle"):
-                    title = entry["customTitle"]
+                    custom_title = entry["customTitle"]
+                elif etype == "ai-title" and entry.get("aiTitle"):
+                    ai_title = entry["aiTitle"]
     except (OSError, IOError):
         pass
-    return {"permission_mode": mode, "custom_title": title}
+    return {"permission_mode": mode, "custom_title": custom_title or ai_title}
 
 
 # -- Session Index Building -------------------------------------------------
@@ -342,6 +304,8 @@ def build_doc(uuid: str, jsonl_data: Dict[str, Any], lifecycle_events: List[Dict
 
     if jsonl_data["custom_title"]:
         custom_title = jsonl_data["custom_title"]
+    elif jsonl_data.get("ai_title"):
+        custom_title = jsonl_data["ai_title"]
     elif not any(m["role"] == "user" and m["text"].strip() for m in messages):
         custom_title = "[Empty session]"
     else:
@@ -381,8 +345,6 @@ def build_doc(uuid: str, jsonl_data: Dict[str, Any], lifecycle_events: List[Dict
         "csm_version": VERSION,
         "session_id": uuid,
         "custom_title": custom_title,
-        "llm_generated_title_raw": None,
-        "llm_title_error": None,
         "jsonl_path": _make_portable_jsonl_path(jsonl_path),
         "slug": slug,
         "initial_working_dir": initial_working_dir,
@@ -510,7 +472,7 @@ def find_sessions(l_keywords: Optional[List[str]], from_days: int, until_days: O
         raw_by_path = {ip: r for _, ip, r in l_all}
         def rank_key(item: Tuple[Dict[str, Any], str]) -> Tuple[int, float]:
             d, idx_path = item
-            title = (d.get("custom_title") or d.get("llm_title") or d.get("auto_title") or "").lower()
+            title = (d.get("custom_title") or "").lower()
             if all(kw.lower() in title for kw in l_keywords):
                 return (0, 0.0)  # title match: stable sort keeps recency order
             raw = raw_by_path.get(idx_path, "")
@@ -872,30 +834,24 @@ def is_ignored_session(jsonl_path: str) -> bool:
 
 def index_one(jsonl_path: str, idx_path: str) -> Tuple[str, str]:
     """Index a single session. Returns (title, source).
-    source is "existing" if title was in JSONL, "autoname" if generated now, "untitled" if no title."""
+    source is "custom" (via /rename), "ai" (native Claude Code ai-title),
+    "empty" (no messages), or "untitled" (has messages but no title)."""
     uuid = Path(jsonl_path).stem
     lifecycle_path = Path(LIFECYCLE_DIR) / f"{uuid}.jsonl"
 
     jsonl_data = parse_jsonl(jsonl_path)
     lifecycle_events = parse_lifecycle(lifecycle_path)
 
-    had_title = bool(jsonl_data["custom_title"])
-
-    if not jsonl_data["messages"]:
-        jsonl_data["custom_title"] = "[Empty session]"
-    elif not had_title:
-        title_out, rc = _run_autoname("jsonl", jsonl_path)
-        if rc == 0 and title_out:
-            jsonl_data["custom_title"] = title_out
-
     doc = build_doc(uuid, jsonl_data, lifecycle_events, jsonl_path)
     write_json_atomic(doc, idx_path)
 
     title = doc["custom_title"]
-    if had_title:
-        source = "existing"
-    elif title != "Untitled session [prompt]":
-        source = "autoname"
+    if jsonl_data["custom_title"]:
+        source = "custom"
+    elif jsonl_data.get("ai_title"):
+        source = "ai"
+    elif title == "[Empty session]":
+        source = "empty"
     else:
         source = "untitled"
     return title, source
@@ -911,7 +867,6 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
     Step 1: Scan local .jsonl history files → d_history
     Step 2: Scan local .json index files → d_index
     Step 3: Decide what to reindex + reindex
-    Step 3c: (force) Retry LLM titles for orphaned index files
     """
     mode = "force-reindex" if force else "reindex"
     if single_uuid:
@@ -1012,57 +967,20 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
                 indexed += 1
                 d_index[idx_path_final] = now_mtime
                 d_uuid_to_idx[uuid] = idx_path_final
-                freshness = "✨" if source in ("autoname", "untitled") else "📄"
-                if source == "autoname" or (source == "existing" and (
-                    title.endswith("[LLM]") or title.endswith("(auto-generated)"))):
-                    authorship = "🤖"
-                elif source == "untitled":
-                    authorship = "⚠️"
+                if source == "custom":
+                    marker = "👤"
+                elif source == "ai":
+                    marker = "🤖"
+                elif source == "empty":
+                    marker = "∅"
                 else:
-                    authorship = "👤"
-                print(f"    [{i}/{n_to_reindex}] {uuid[:8]}  indexed {freshness}{authorship} {title[:60]}", flush=True)
+                    marker = "⚠️"
+                print(f"    [{i}/{n_to_reindex}] {uuid[:8]}  indexed {marker} {title[:60]}", flush=True)
             else:
                 errors += 1
                 print(f"    [{i}/{n_to_reindex}] {uuid[:8]}  ERROR: {exc}", file=sys.stderr, flush=True)
 
     print(f"  Step 3b: indexed={indexed}, errors={errors}")
-
-    # -- Step 3c: (force, all sessions only) Refresh titles for orphaned index files via autoname
-    if force and not single_uuid:
-        d_history_uuids = {Path(p).stem for p in d_history}
-        orphan_idx_files = [
-            (uuid, path) for uuid, path in d_uuid_to_idx.items()
-            if uuid not in d_history_uuids
-        ]
-        if max_sessions:
-            orphan_idx_files = orphan_idx_files[:max_sessions]
-        n_orphans = len(orphan_idx_files)
-        if n_orphans:
-            print(f"  Step 3c: {n_orphans} orphaned index files, refreshing titles via autoname ...", flush=True)
-            refreshed = 0
-
-            def _refresh_worker(uuid: str, idx_path: str) -> Tuple[str, Optional[str], int]:
-                title_out, rc = _run_autoname("index", idx_path)
-                return uuid, title_out, rc
-
-            with ThreadPoolExecutor(max_workers=min(10, n_orphans)) as executor:
-                futures = {
-                    executor.submit(_refresh_worker, u, p): (u, p)
-                    for u, p in orphan_idx_files
-                }
-                for future in as_completed(futures):
-                    uuid, title_out, rc = future.result()
-                    if rc == 0 and title_out:
-                        refreshed += 1
-                        d_index[futures[future][1]] = time.time()
-                        print(f"    {uuid[:8]}  refreshed: {title_out[:60]}", flush=True)
-                    elif rc == 2:
-                        print(f"    {uuid[:8]}  skipped: already titled or autoname unavailable", flush=True)
-                    else:
-                        print(f"    {uuid[:8]}  skipped: autoname error (exit {rc})", flush=True)
-            print(f"  Step 3c: {refreshed}/{n_orphans} titles refreshed")
-        else:
-            print(f"  Step 3c: no orphaned index files")
 
     return {"sessions_scanned": total_scanned, "sessions_indexed": indexed, "sessions_skipped": skipped, "errors": errors}
 
@@ -1198,9 +1116,9 @@ def cmd_resume(keywords: List[str], from_days: int, until_days: Optional[int], f
 
         # Always set TUI header via /rename as the initial prompt.
         # Warnings are handled separately by the lifecycle_generation.sh hook via additionalContext.
-        display_title = jsonl_title or title or d_fields.get("llm_title", "") or d_fields.get("auto_title", "")
+        display_title = jsonl_title or title
         if display_title:
-            clean_title = re.sub(r'\s*(\[(LLM|prompt)\]|\(auto-generated\))\s*$', '', display_title)
+            clean_title = re.sub(r'\s*\[prompt\]\s*$', '', display_title)
             cmd += f" {shlex.quote('/rename ' + clean_title)}"
 
         print(f"Command:            {cmd}")
@@ -1239,7 +1157,7 @@ def main() -> None:
 
     reindex_parser = subparsers.add_parser("reindex", help="Re-index all sessions now")
     reindex_parser.add_argument("-n", "--max", type=int, default=0, help="Max sessions to process (0 = unlimited, default: 0)")
-    reindex_parser.add_argument("--force", action="store_true", help="Force reindex all sessions + retry LLM titles for orphaned index files")
+    reindex_parser.add_argument("--force", action="store_true", help="Force reindex all sessions, ignoring mtime-based skip")
     reindex_parser.add_argument("--uuid", default="", help="Reindex a single session by UUID")
 
     parser.add_argument("--version", action="store_true", help="Show version")
@@ -1262,7 +1180,7 @@ Usage:
 
 Options for 'csm reindex':
   -n, --max N             Max sessions to process (0 = unlimited, default: 0)
-  --force                 Force reindex all + retry LLM titles for deleted sessions
+  --force                 Force reindex all sessions, ignoring mtime-based skip
   --uuid UUID             Reindex a single session by UUID
 
 Options for 'csm resume':
@@ -1286,7 +1204,7 @@ Examples:
   csm resume -v               # with verbose logging
   csm reindex
   csm reindex -n 5         # reindex at most 5 sessions
-  csm reindex --force      # force reindex + fix orphan titles
+  csm reindex --force      # force reindex, ignoring mtime-based skip
 """, file=sys.stderr)
         sys.exit(0 if args.help else 1)
 
