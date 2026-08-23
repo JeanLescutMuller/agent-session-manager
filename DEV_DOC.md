@@ -267,8 +267,8 @@ Every machine is fully local and self-contained - no mounts, no symlinks to shar
 | `~/.csm/lifecycles/` | real local directory (written by `lifecycle_generation.sh`) |
 | `~/.csm/settings.json` | CSM's own settings |
 | `~/.csm/sync-log.jsonl` | append-only sync-attempt log |
-| `~/opt/claude_session_manager/` | canonical deployment location - `bin/{csm,csm-sync,status}`, `lifecycle_generation.sh`, `csm-reindex-sync.sh`, `install.sh`/`uninstall.sh` copies |
-| `~/.local/bin/{csm,csm-sync,status}` | symlinks into `~/opt/claude_session_manager/bin/` - the only thing on `$PATH`, never real files |
+| `~/opt/claude-session-manager/` | canonical deployment location - `bin/{csm,csm-sync,status}`, `lifecycle_generation.sh`, `csm-reindex-sync.sh`, `install.sh`/`uninstall.sh` copies |
+| `~/.local/bin/{csm,csm-sync,status}` | symlinks into `~/opt/claude-session-manager/bin/` - the only thing on `$PATH`, never real files |
 
 `csm-sync` (optional) reconciles `~/.csm/indexes/` with the equivalent directory on one remote host over SSH - see R6.4. There is no per-platform slug-aliasing setup step; that only made sense when multiple machines shared one mounted folder.
 

@@ -139,7 +139,7 @@ cd claude-session-manager
 bash install.sh
 ```
 
-Installs `csm`, `csm-sync`, and `status` under `~/opt/claude_session_manager/bin/` (the canonical deployment location), symlinked from `~/.local/bin/` so they're on your `$PATH` - `~/.local/bin/` never holds real files, only symlinks. Also registers the `SessionStart`/`SessionEnd` lifecycle hooks in `~/.claude/settings.json`, installs the `/inject` skill, and sets up a scheduled job that reindexes then syncs every 30 min (`launchd` on macOS, a `systemd --user` timer on Linux - on Linux, `install.sh` also best-effort enables lingering so the timer runs even without an active session). Requires `fzf`. If `~/.local/bin` isn't already on your `$PATH`, `install.sh` will tell you.
+Installs `csm`, `csm-sync`, and `status` under `~/opt/claude-session-manager/bin/` (the canonical deployment location), symlinked from `~/.local/bin/` so they're on your `$PATH` - `~/.local/bin/` never holds real files, only symlinks. Also registers the `SessionStart`/`SessionEnd` lifecycle hooks in `~/.claude/settings.json`, installs the `/inject` skill, and sets up a scheduled job that reindexes then syncs every 30 min (`launchd` on macOS, a `systemd --user` timer on Linux - on Linux, `install.sh` also best-effort enables lingering so the timer runs even without an active session). Requires `fzf`. If `~/.local/bin` isn't already on your `$PATH`, `install.sh` will tell you.
 
 If you're upgrading from an older install that used `~/.claude/csm-settings.json` / `~/.claude/session-index-local/` / co-located `*.lifecycle.jsonl` sidecars, `install.sh` migrates all of that to the current `~/.csm/` layout automatically - safe to re-run.
 

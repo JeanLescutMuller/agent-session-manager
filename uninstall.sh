@@ -7,11 +7,12 @@
 #   - ~/.csm/ (index, settings, lifecycle sidecars, sync log)
 #
 # Run: bash uninstall.sh   (from the repo root)
-# Or:  ~/opt/claude_session_manager/uninstall.sh
+# Or:  ~/opt/claude-session-manager/uninstall.sh
 
 set -euo pipefail
 
-SERVICE_DIR="$HOME/opt/claude_session_manager"
+SERVICE_DIR="$HOME/opt/claude-session-manager"
+OLD_SERVICE_DIR="$HOME/opt/claude_session_manager"
 IS_MACOS=$( [[ "$(uname -s)" == "Darwin" ]] && echo true || echo false )
 
 echo "Uninstalling Claude Session Manager..."
@@ -107,6 +108,12 @@ fi
 if [ -d "$SERVICE_DIR" ]; then
     rm -rf "$SERVICE_DIR"
     echo "  Removed $SERVICE_DIR"
+fi
+
+# Also clean up a pre-rename (underscore) deployment, if one was never migrated
+if [ -d "$OLD_SERVICE_DIR" ]; then
+    rm -rf "$OLD_SERVICE_DIR"
+    echo "  Removed $OLD_SERVICE_DIR (legacy underscore path)"
 fi
 
 echo ""

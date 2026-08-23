@@ -2,10 +2,10 @@
 # install.sh - Claude Session Manager
 #
 # Installs CSM from this source checkout to system locations:
-#   ~/opt/claude_session_manager/bin/     - canonical deployment: csm, csm-sync, status
+#   ~/opt/claude-session-manager/bin/     - canonical deployment: csm, csm-sync, status
 #   ~/.local/bin/                         - PATH entry points, symlinked into the above
 #   ~/.claude/skills/inject/SKILL.md      - /inject skill
-#   ~/opt/claude_session_manager/         - service scripts + logs (canonical location)
+#   ~/opt/claude-session-manager/         - service scripts + logs (canonical location)
 #   ~/.csm/                               - settings, index, lifecycle sidecars, sync log
 #   ~/Library/LaunchAgents/ (macOS) or
 #     ~/.config/systemd/user/ (Linux)     - scheduled reindex + sync
@@ -15,7 +15,7 @@
 #   git clone <repo-url> && cd claude-session-manager && bash install.sh
 #
 # Re-install after update (from deployed copy):
-#   ~/opt/claude_session_manager/install.sh
+#   ~/opt/claude-session-manager/install.sh
 
 set -euo pipefail
 
@@ -25,7 +25,8 @@ SRC_DIR="$SCRIPT_DIR/src"
 MACOS_DIR="$SRC_DIR/macos"
 LINUX_DIR="$SRC_DIR/linux"
 
-SERVICE_DIR="$HOME/opt/claude_session_manager"
+SERVICE_DIR="$HOME/opt/claude-session-manager"
+OLD_SERVICE_DIR="$HOME/opt/claude_session_manager"
 SETTINGS_JSON="$HOME/.claude/settings.json"
 IS_MACOS=$( [[ "$(uname -s)" == "Darwin" ]] && echo true || echo false )
 
@@ -104,7 +105,12 @@ if [ -d "$HOME/.claude/projects" ]; then
     [ "$MIGRATED_LC" -gt 0 ] && echo "  Migrated $MIGRATED_LC lifecycle sidecar(s) -> ~/.csm/lifecycles/"
 fi
 
-# -- Service scripts -> ~/opt/claude_session_manager/ ----------
+if [ -d "$OLD_SERVICE_DIR" ] && [ ! -d "$SERVICE_DIR" ]; then
+    mv "$OLD_SERVICE_DIR" "$SERVICE_DIR"
+    echo "  Migrated $OLD_SERVICE_DIR -> $SERVICE_DIR (dash naming, matches the repo)"
+fi
+
+# -- Service scripts -> ~/opt/claude-session-manager/ ----------
 
 mkdir -p "$SERVICE_DIR"
 
@@ -123,7 +129,7 @@ for script in install.sh uninstall.sh; do
     echo "  $SERVICE_DIR/$script"
 done
 
-# -- csm, csm-sync, status -> ~/opt/claude_session_manager/bin/, symlinked --
+# -- csm, csm-sync, status -> ~/opt/claude-session-manager/bin/, symlinked --
 # -- from ~/.local/bin/. ~/opt/.../ is the canonical deployment location;   --
 # -- ~/.local/bin/ only ever holds PATH-visible entry points, no real files.
 
@@ -237,8 +243,8 @@ fi
 # -- Register lifecycle hooks in settings.json --------------------------------
 
 # Uses $HOME so the path resolves correctly on any machine.
-HOOK_CMD_START='HOOK_EVENT=start "$HOME/opt/claude_session_manager/lifecycle_generation.sh"'
-HOOK_CMD_END='HOOK_EVENT=end "$HOME/opt/claude_session_manager/lifecycle_generation.sh"'
+HOOK_CMD_START='HOOK_EVENT=start "$HOME/opt/claude-session-manager/lifecycle_generation.sh"'
+HOOK_CMD_END='HOOK_EVENT=end "$HOME/opt/claude-session-manager/lifecycle_generation.sh"'
 
 if [ -f "$SETTINGS_JSON" ]; then
     python3 - "$SETTINGS_JSON" "$HOOK_CMD_START" "$HOOK_CMD_END" <<'PYEOF'

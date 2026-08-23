@@ -32,7 +32,7 @@ warn() { echo -e "  \033[33mWARN\033[0m  $1"; WARN=$((WARN+1)); }
 section() { echo ""; echo "== $1 =="; }
 
 CSM_HOME="$HOME/.csm"
-DEPLOY_DIR="$HOME/opt/claude_session_manager"
+DEPLOY_DIR="$HOME/opt/claude-session-manager"
 BIN_DIR="$DEPLOY_DIR/bin"
 LOCAL_BIN="$HOME/.local/bin"
 
