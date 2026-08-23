@@ -77,3 +77,12 @@ to `~/opt/claude-session-manager/` (dash, matches the repo name) if found.
 | Lifecycle hooks | `~/.claude/settings.json` (auto-registered) | All |
 | Scheduled reindex+sync | `~/Library/LaunchAgents/com.csm.reindex-sync.plist` | macOS |
 | Scheduled reindex+sync | `~/.config/systemd/user/com.csm.reindex-sync.{service,timer}` (+ best-effort `loginctl enable-linger`) | Linux |
+
+## Currently deployed (verified 2026-08-23)
+
+| Host | Deployed dir | Timer/plist | Interval |
+|---|---|---|---|
+| MacBookProPerso (laptop) | `~/opt/claude-session-manager/` (dash — matches repo name, current layout) | `~/Library/LaunchAgents/com.csm.reindex-sync.plist` | every 30 min |
+| H-Frank-1 (VM) | `~/opt/claude_session_manager/` (underscore — **legacy path**, install.sh's self-migration hasn't been re-run here yet) | `~/.config/systemd/user/com.csm.reindex-sync.{service,timer}` | every 30 min |
+
+Hub-and-spoke, matching the convention above: the Mac is the spoke (`~/.csm/settings.json`'s `remote_ssh_host` = `72.60.32.237`, the VM's IP, port `443`), the VM is the hub (`remote_ssh_host` empty — never dials out). Re-running `install.sh` on the VM would migrate it to the dash-named path and bring it in line with the Mac.
