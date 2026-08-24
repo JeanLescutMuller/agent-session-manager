@@ -8,7 +8,8 @@
 #   ~/opt/claude-session-manager/         - service scripts + logs (canonical location)
 #   ~/.csm/                               - settings, index, lifecycle sidecars, sync log
 #   ~/Library/LaunchAgents/ (macOS) or
-#     ~/.config/systemd/user/ (Linux)     - scheduled reindex + sync
+#     ~/.config/systemd/user/ (Linux)     - symlink only; real plist/unit files
+#                                           live in ~/opt/claude-session-manager/
 #   ~/.claude/settings.json               - lifecycle hooks (auto-registered)
 #
 # First install:
@@ -191,6 +192,9 @@ fi
 if $IS_MACOS; then
     # macOS: launchd. Templated at install time - the source plist ships with
     # placeholders since the wrapper-script path and log dir are per-user ($HOME).
+    # The real file lives in $SERVICE_DIR (~/opt/...) alongside everything else
+    # CSM owns; ~/Library/LaunchAgents/ only ever holds a symlink to it, same
+    # convention as ~/.local/bin/csm symlinking into $SERVICE_DIR/bin/.
     LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
     mkdir -p "$LAUNCH_AGENTS"
 
@@ -202,23 +206,44 @@ if $IS_MACOS; then
     fi
 
     plist="com.csm.reindex-sync.plist"
+    REAL_PLIST="$SERVICE_DIR/$plist"
+    LINK_PLIST="$LAUNCH_AGENTS/$plist"
+
+    # A prior install may have written a real file straight into LaunchAgents
+    # (pre-symlink layout) - unload and clear it before switching to a symlink.
+    if [ -e "$LINK_PLIST" ] && [ ! -L "$LINK_PLIST" ]; then
+        launchctl unload "$LINK_PLIST" 2>/dev/null || true
+        rm -f "$LINK_PLIST"
+    fi
+
     sed -e "s|__WRAPPER_SCRIPT__|$SERVICE_DIR/csm-reindex-sync.sh|g" -e "s|__LOG_DIR__|$SERVICE_DIR|g" \
-        "$MACOS_DIR/$plist" > "$LAUNCH_AGENTS/$plist"
-    launchctl unload "$LAUNCH_AGENTS/$plist" 2>/dev/null || true
-    launchctl load "$LAUNCH_AGENTS/$plist"
-    echo "  $LAUNCH_AGENTS/$plist (loaded)"
+        "$MACOS_DIR/$plist" > "$REAL_PLIST"
+    ln -sf "$REAL_PLIST" "$LINK_PLIST"
+    launchctl unload "$LINK_PLIST" 2>/dev/null || true
+    launchctl load "$LINK_PLIST"
+    echo "  $REAL_PLIST  (symlinked from $LINK_PLIST, loaded)"
 else
     # Linux: systemd --user timer. Unit files use systemd's native %h
     # specifier for the home directory, so no templating is needed here.
+    # Real files live in $SERVICE_DIR; ~/.config/systemd/user/ only holds
+    # symlinks to them, mirroring the macOS layout above.
     if command -v systemctl &>/dev/null; then
         SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
         mkdir -p "$SYSTEMD_USER_DIR"
-        cp "$LINUX_DIR/com.csm.reindex-sync.service" "$SYSTEMD_USER_DIR/"
-        cp "$LINUX_DIR/com.csm.reindex-sync.timer" "$SYSTEMD_USER_DIR/"
+
+        for unit in com.csm.reindex-sync.service com.csm.reindex-sync.timer; do
+            REAL_UNIT="$SERVICE_DIR/$unit"
+            LINK_UNIT="$SYSTEMD_USER_DIR/$unit"
+            cp "$LINUX_DIR/$unit" "$REAL_UNIT"
+            # A prior install may have written a real file here directly
+            # (pre-symlink layout) - clear it before switching to a symlink.
+            [ -e "$LINK_UNIT" ] && [ ! -L "$LINK_UNIT" ] && rm -f "$LINK_UNIT"
+            ln -sf "$REAL_UNIT" "$LINK_UNIT"
+        done
 
         if systemctl --user daemon-reload 2>/dev/null && \
            systemctl --user enable --now com.csm.reindex-sync.timer 2>/dev/null; then
-            echo "  $SYSTEMD_USER_DIR/com.csm.reindex-sync.{service,timer} (enabled)"
+            echo "  $SERVICE_DIR/com.csm.reindex-sync.{service,timer}  (symlinked from $SYSTEMD_USER_DIR, enabled)"
         else
             echo "  WARNING: could not enable the systemd timer. Run manually later:"
             echo "    systemctl --user daemon-reload && systemctl --user enable --now com.csm.reindex-sync.timer"
