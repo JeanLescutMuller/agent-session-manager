@@ -1,0 +1,17 @@
+# Claude Code local tool state - not project content, contains local paths
+.claude/settings.local.json
+
+# Defense in depth: the real settings file lives at ~/.asm/settings.json,
+# outside this repo entirely, and should never be placed here - but ignore it
+# just in case, while still allowing the tracked empty template.
+settings.json
+!src/settings.json
+*.local.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

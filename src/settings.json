@@ -1,0 +1,11 @@
+{
+  "local_projects_dir": "~/.claude/projects",
+  "local_index_dir": "~/.asm/indexes",
+  "lifecycle_dir": "~/.asm/lifecycles",
+  "ignore_path_substrings": [],
+  "sync_stale_warning_hours": 24,
+  "remote_ssh_host": "",
+  "remote_ssh_user": "",
+  "remote_ssh_port": "22",
+  "remote_index_dir": "~/.asm/indexes"
+}
