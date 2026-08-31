@@ -37,7 +37,7 @@ fi
 [[ -z "$SESSION_ID" || -z "$TRANSCRIPT_PATH" ]] && exit 0
 
 # --- Derive sidecar path ---
-SIDECAR_PATH="$HOME/.asm/lifecycles/${SESSION_ID}.jsonl"
+SIDECAR_PATH="$HOME/opt/agent-session-manager/data/lifecycles/${SESSION_ID}.jsonl"
 
 # --- Infer event type ---
 if [[ "$HOOK_EVENT" == "end" ]]; then

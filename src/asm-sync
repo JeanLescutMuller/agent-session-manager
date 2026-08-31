@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # asm-sync - Sync the local ASM index with a remote host over SSH.
 #
-# Optional. If no remote host is configured in ~/.asm/settings.json, exits
+# Optional. If no remote host is configured in ~/opt/agent-session-manager/data/settings.json, exits
 # silently. There is no shared filesystem or mount assumed - all remote access
 # goes through `ssh`/`rsync`.
 #
-# Index-only: this only syncs ~/.asm/indexes/*.json, never the raw .jsonl
+# Index-only: this only syncs ~/opt/agent-session-manager/data/indexes/*.json, never the raw .jsonl
 # session transcripts or .lifecycle.jsonl sidecars. The index already embeds
 # full conversation text, so nothing needed for search/`/inject` is lost by
 # not syncing the raw files - and since index files are always fully
@@ -14,7 +14,7 @@
 # version of this script that also synced raw session files).
 #
 # Every real (non-dry-run) run that reaches the reachability check appends one
-# line to ~/.asm/sync-log.jsonl recording the outcome - `asm resume` reads
+# line to ~/opt/agent-session-manager/data/sync-log.jsonl recording the outcome - `asm resume` reads
 # this to warn when the local index is stale relative to the remote.
 #
 # Usage:
@@ -30,7 +30,7 @@ RST='\033[0m'
 
 # -- Settings -----------------------------------------------------------------
 
-ASM_SETTINGS="$HOME/.asm/settings.json"
+ASM_SETTINGS="$HOME/opt/agent-session-manager/data/settings.json"
 
 read_setting() {
     python3 -c "
@@ -64,10 +64,10 @@ REMOTE_SSH_USER=$(read_setting remote_ssh_user)
 REMOTE_SSH_PORT=$(read_setting remote_ssh_port)
 REMOTE_INDEX_DIR=$(read_setting_raw remote_index_dir)
 
-: "${LOCAL_INDEX:=$HOME/.asm/indexes}"
-: "${REMOTE_INDEX_DIR:=~/.asm/indexes}"
+: "${LOCAL_INDEX:=$HOME/opt/agent-session-manager/data/indexes}"
+: "${REMOTE_INDEX_DIR:=~/opt/agent-session-manager/data/indexes}"
 
-SYNC_LOG="$HOME/.asm/sync-log.jsonl"
+SYNC_LOG="$HOME/opt/agent-session-manager/data/sync-log.jsonl"
 
 write_sync_log() {
     # write_sync_log <outcome> [synced] [errors] - no-op during --check
@@ -87,7 +87,7 @@ with open(sys.argv[4], 'a') as f:
 
 # Exit if remote not configured
 if [ -z "$REMOTE_SSH_HOST" ]; then
-    echo "asm-sync: remote not configured in ~/.asm/settings.json (skipping)"
+    echo "asm-sync: remote not configured in ~/opt/agent-session-manager/data/settings.json (skipping)"
     exit 0
 fi
 

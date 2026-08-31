@@ -3,8 +3,8 @@
 #
 # Removes all installed ASM artifacts. Does NOT touch:
 #   - This source folder
-#   - Session history (.jsonl files in ~/.claude/projects/)
-#   - ~/.asm/ (index, settings, lifecycle sidecars, sync log)
+#   - Session history (.jsonl files in ~/.claude/projects/ or ~/.codex/sessions/)
+#   - ~/opt/agent-session-manager/data/ (index, settings, lifecycle sidecars, sync log)
 #
 # Run: bash uninstall.sh   (from the repo root)
 # Or:  ~/opt/agent-session-manager/uninstall.sh
@@ -54,6 +54,11 @@ if [ -d "$HOME/.claude/skills/inject" ]; then
     echo "  Removed ~/.claude/skills/inject/"
 fi
 
+if [ -d "$HOME/.codex/skills/inject" ]; then
+    rm -rf "$HOME/.codex/skills/inject"
+    echo "  Removed ~/.codex/skills/inject/"
+fi
+
 # -- Remove info skill ---------------------------------------------------------
 
 if [ -d "$HOME/.claude/skills/info" ]; then
@@ -100,16 +105,27 @@ PYEOF
     echo "  Removed lifecycle hooks from $SETTINGS_JSON"
 fi
 
-# -- Remove service directory -----------------------------------------------
+# -- Remove Codex plugin (session lifecycle hooks) ---------------------------
+
+if command -v codex &>/dev/null; then
+    codex plugin remove asm@asm-local >/dev/null 2>&1 || true
+    codex plugin marketplace remove asm-local >/dev/null 2>&1 || true
+    echo "  Removed asm@asm-local plugin/marketplace from ~/.codex/config.toml (if present)"
+fi
+
+# -- Remove service directory, preserving data/ ------------------------------
+# data/ (settings, index, lifecycle sidecars, sync log) lives inside
+# $SERVICE_DIR alongside the code/scripts, so this can't just rm -rf the
+# whole thing - only the non-data children are removed.
 
 if [ -d "$SERVICE_DIR" ]; then
-    rm -rf "$SERVICE_DIR"
-    echo "  Removed $SERVICE_DIR"
+    find "$SERVICE_DIR" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+    echo "  Removed $SERVICE_DIR (kept $SERVICE_DIR/data)"
 fi
 
 echo ""
-echo "Done. ~/.asm/ (index, settings, lifecycle sidecars, sync log) and session"
-echo "history (~/.claude/projects/) were preserved."
+echo "Done. $SERVICE_DIR/data/ (index, settings, lifecycle sidecars, sync log)"
+echo "and session history (~/.claude/projects/) were preserved."
 echo ""
 echo "To also remove ASM's own data (optional):"
-echo "  rm -rf ~/.asm/"
+echo "  rm -rf $SERVICE_DIR/data"

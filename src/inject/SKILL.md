@@ -1,23 +1,27 @@
 ---
 name: inject
-description: Inject the content of a past Claude Code session into the current conversation. Use when asm resume determined true resume is not possible, or when the user asks to inject a past session by UUID or keywords.
+description: Inject the content of a past session (Claude Code or Codex) into the current conversation. Use when asm resume determined true resume is not possible, or when the user asks to inject a past session by UUID or keywords.
 allowed-tools: Read, Bash(cat *)
 ---
 
-Inject the content of a past Claude Code session into the current conversation.
+Inject the content of a past session (Claude Code or Codex, either one -
+`asm` indexes both into the same catalog) into the current conversation.
 
 Use this when `asm resume` determined that true resume is not possible (the
-original working directory does not exist on this machine).
+original working directory does not exist on this machine, or the session
+belongs to an agent that doesn't support true resume from here).
 
 ## Instructions
 
-1. **Parse the argument** from the user's message (passed after `/inject`):
+1. **Parse the argument** from whatever the user said when invoking this
+   skill (a UUID or keywords, e.g. `/inject <uuid>` in Claude Code, or a
+   plain-text mention of this skill plus the UUID/keywords in Codex):
    - If it looks like a UUID (hex with dashes, 36 chars), treat it as a session ID directly.
-   - Otherwise, treat it as a search query: search `~/.asm/indexes/*.json`
+   - Otherwise, treat it as a search query: search `~/opt/agent-session-manager/data/indexes/*.json`
      for sessions whose `custom_title` or conversation text contains the keywords,
      pick the most recently active match, and confirm with the user before loading.
 
-2. **Load the index file**: `~/.asm/indexes/<uuid>.json`
+2. **Load the index file**: `~/opt/agent-session-manager/data/indexes/<uuid>.json`
 
 3. **Display session metadata** to the user:
    - Title, working directory, hostname, last active timestamp, session state.

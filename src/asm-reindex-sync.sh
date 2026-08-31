@@ -7,7 +7,7 @@
 #
 # No `set -e`: a failed reindex must never skip the sync step below it - sync
 # has its own independent success/failure handling (and logs to
-# ~/.asm/sync-log.jsonl), so it must always get a chance to run.
+# ~/opt/agent-session-manager/data/sync-log.jsonl), so it must always get a chance to run.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

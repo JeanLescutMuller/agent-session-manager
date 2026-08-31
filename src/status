@@ -152,7 +152,7 @@ def main() -> None:
 
     matches = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
     jsonl_path = matches[0] if matches else None
-    idx_path = os.path.expanduser(f"~/.asm/indexes/{sid}.json")
+    idx_path = os.path.expanduser(f"~/opt/agent-session-manager/data/indexes/{sid}.json")
 
     s = scan(jsonl_path) if jsonl_path else Stats()
     cost = s.cost

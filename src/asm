@@ -3,7 +3,7 @@
 asm - Agent Session Manager (Pure Python, local index)
 
 Index architecture:
-  reindex → builds JSON index from local .jsonl files (~/.asm/indexes/)
+  reindex → builds JSON index from local .jsonl files (~/opt/agent-session-manager/data/indexes/)
   resume  → reads from local index for fast disk I/O
   close   → terminates a running session, leaving it resumable
 
@@ -32,30 +32,39 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-VERSION = "v4.5"
+VERSION = "v4.6"
 HOME = os.path.expanduser("~")
+ASM_DATA_DIR = os.path.join(HOME, "opt", "agent-session-manager", "data")
 
 # -- Settings --------------------------------------------------------------
 
-SETTINGS_PATH = os.path.join(HOME, ".asm", "settings.json")
+SETTINGS_PATH = os.path.join(ASM_DATA_DIR, "settings.json")
 
 def _load_settings() -> Dict[str, Any]:
-    """Load ASM settings from ~/.asm/settings.json with defaults."""
+    """Load ASM settings from ~/opt/agent-session-manager/data/settings.json
+    with defaults."""
     defaults: Dict[str, Any] = {
         "local_projects_dir": "~/.claude/projects",
-        "local_index_dir": "~/.asm/indexes",
-        "lifecycle_dir": "~/.asm/lifecycles",
+        "local_index_dir": "~/opt/agent-session-manager/data/indexes",
+        "lifecycle_dir": "~/opt/agent-session-manager/data/lifecycles",
         "ignore_path_substrings": [],
         "sync_stale_warning_hours": 24,
         "remote_ssh_host": "",
+        "codex_sessions_dir": "~/.codex/sessions",
+        "codex_session_index_file": "~/.codex/session_index.jsonl",
+        # None = auto-detect (enabled iff codex_sessions_dir exists); an explicit
+        # true/false in settings.json overrides the auto-detect.
+        "codex_enabled": None,
     }
     try:
         with open(SETTINGS_PATH) as f:
             user = json.load(f)
         for k, v in user.items():
-            if isinstance(v, str) and v != "":
+            if isinstance(v, bool):
+                defaults[k] = v
+            elif isinstance(v, str) and v != "":
                 defaults[k] = v
             elif isinstance(v, list) and k == "ignore_path_substrings":
                 defaults[k] = [s for s in v if isinstance(s, str) and s]
@@ -72,10 +81,16 @@ LOCAL_INDEX_DIR = os.path.expanduser(_SETTINGS["local_index_dir"])
 LIFECYCLE_DIR = os.path.expanduser(_SETTINGS["lifecycle_dir"])
 IGNORE_PATH_SUBSTRINGS: List[str] = _SETTINGS.get("ignore_path_substrings", [])
 SYNC_STALE_WARNING_HOURS: float = _SETTINGS.get("sync_stale_warning_hours", 24)
-SYNC_LOG_PATH = os.path.join(HOME, ".asm", "sync-log.jsonl")
+SYNC_LOG_PATH = os.path.join(ASM_DATA_DIR, "sync-log.jsonl")
 LIVE_SESSIONS_DIR = os.path.join(HOME, ".claude", "sessions")
-CLOSE_TOMBSTONE_DIR = os.path.join(HOME, ".asm", "close-tombstones")
-CLOSE_LOG_PATH = os.path.join(HOME, ".asm", "close-log.jsonl")
+CLOSE_TOMBSTONE_DIR = os.path.join(ASM_DATA_DIR, "close-tombstones")
+CLOSE_LOG_PATH = os.path.join(ASM_DATA_DIR, "close-log.jsonl")
+
+CODEX_SESSIONS_DIR = os.path.expanduser(_SETTINGS["codex_sessions_dir"])
+CODEX_SESSION_INDEX_FILE = os.path.expanduser(_SETTINGS["codex_session_index_file"])
+_codex_enabled_setting = _SETTINGS.get("codex_enabled")
+CODEX_ENABLED = (_codex_enabled_setting if isinstance(_codex_enabled_setting, bool)
+                 else os.path.isdir(CODEX_SESSIONS_DIR))
 
 # -- ANSI Colors ------------------------------------------------------------
 
@@ -89,6 +104,8 @@ C_DIR = "\033[38;5;240m"
 # hashes per process, so the same host changed color on every single run.
 C_HOST_LOCAL = "\033[38;5;33m"    # blue      - this machine
 C_HOST_REMOTE = "\033[38;5;88m"   # dark red  - some other machine
+C_AGENT_CLAUDE = "\033[38;5;173m"  # terracotta - claude sessions
+C_AGENT_CODEX = "\033[38;5;37m"    # teal       - codex sessions
 
 C_FRESH = "\033[38;5;82m"      # bright green - active in the last 15 min
 C_RECENT = "\033[38;5;148m"    # yellow-green - within the hour
@@ -126,7 +143,7 @@ LOCAL_HOSTNAME = short_host(socket.gethostname()) or ""
 TITLE_SOURCE_MARKERS = {"custom": "👤", "ai": "🤖", "empty": "∅", "untitled": "⚠️"}
 TITLE_SOURCE_LABELS = {
     "custom": "manual (/rename)",
-    "ai": "AI-generated (Claude Code native)",
+    "ai": "AI-generated (native)",
     "empty": "n/a (empty session)",
     "untitled": "none set",
 }
@@ -341,6 +358,86 @@ def read_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
     )
 
 
+# -- Codex backend: transcript parsing ---------------------------------------
+# Codex's rollout .jsonl is shaped completely differently from Claude's: each
+# line is {timestamp, type, payload}. The working directory comes straight off
+# the first "session_meta" line's payload.cwd (no slug-decoding needed, unlike
+# Claude). Titles aren't in the transcript at all - they live in a separate
+# append-only log, ~/.codex/session_index.jsonl ({id, thread_name,
+# updated_at}), latest line per id wins - so they're looked up separately and
+# mapped onto Transcript.ai_title (Codex has no /rename-equivalent "custom"
+# title source, so custom_title is always None for this backend).
+
+_codex_titles_cache: Optional[Dict[str, str]] = None
+
+
+def _codex_session_titles() -> Dict[str, str]:
+    """uuid -> latest thread_name from ~/.codex/session_index.jsonl.
+
+    Cached for the lifetime of the process: the file only grows during a
+    reindex run, and re-reading it once per session would be O(sessions^2).
+    """
+    global _codex_titles_cache
+    if _codex_titles_cache is None:
+        titles: Dict[str, str] = {}
+        for entry in iter_entries(CODEX_SESSION_INDEX_FILE):
+            sid, name = entry.get("id"), entry.get("thread_name")
+            if sid and name:
+                titles[sid] = name
+        _codex_titles_cache = titles
+    return _codex_titles_cache
+
+
+def read_codex_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
+    """Parse a Codex rollout .jsonl into a Transcript (single pass over the file)."""
+    session_id = cwd = created_at = last_active = None
+    messages: List[Dict[str, Any]] = []
+
+    for entry in iter_entries(jsonl_path, warn=warn):
+        etype = entry.get("type")
+        payload = entry.get("payload") or {}
+
+        if etype == "session_meta":
+            session_id = payload.get("session_id") or payload.get("id") or session_id
+            cwd = payload.get("cwd") or cwd
+            continue
+
+        if etype != "response_item" or payload.get("type") != "message":
+            continue
+
+        # "developer"-role entries are injected instructions (AGENTS.md, skill
+        # text, mode reminders) - bookkeeping, not a conversation turn, exactly
+        # like a Claude tool_result is excluded by is_tool_result() above.
+        role = payload.get("role")
+        if role not in ("user", "assistant"):
+            continue
+
+        content = payload.get("content")
+        text = ""
+        if isinstance(content, list):
+            parts = [b.get("text", "") for b in content
+                     if isinstance(b, dict) and b.get("type") in ("input_text", "output_text")]
+            text = "\n".join(p for p in parts if p)
+        text = NOISE_RE.sub("", text).strip()
+        if text:
+            ts = entry.get("timestamp")
+            if created_at is None:
+                created_at = ts
+            last_active = ts
+            messages.append({"role": role, "timestamp": ts, "text": text})
+
+    return Transcript(
+        session_id=session_id or Path(jsonl_path).stem,
+        custom_title=None,
+        ai_title=_codex_session_titles().get(session_id or ""),
+        permission_mode=None,
+        cwd=cwd,
+        created_at=created_at,
+        last_active=last_active,
+        messages=messages,
+    )
+
+
 # -- Session Index Building -------------------------------------------------
 
 def resolve_title(t: Transcript) -> Tuple[str, str]:
@@ -374,7 +471,7 @@ def determine_state(lifecycle_events: List[Dict[str, Any]]) -> str:
 
 
 def build_doc(uuid: str, transcript: Transcript, lifecycle_events: List[Dict[str, Any]],
-              jsonl_path: str) -> Dict[str, Any]:
+              jsonl_path: str, agent_type: str = "claude") -> Dict[str, Any]:
     """Build the index document for one session."""
     title, title_source = resolve_title(transcript)
 
@@ -399,6 +496,7 @@ def build_doc(uuid: str, transcript: Transcript, lifecycle_events: List[Dict[str
 
     return {
         "asm_version": VERSION,
+        "agent_type": agent_type,
         "session_id": uuid,
         "custom_title": title,
         "title_source": title_source,
@@ -440,6 +538,8 @@ class SearchOpts(NamedTuple):
     until_days: Optional[int] = None
     host: str = ""
     state: str = ""
+    agent: str = ""
+    tmux: str = ""
     max_scan: int = 50
     uuid: str = ""
     verbose: bool = False
@@ -452,6 +552,8 @@ class SearchOpts(NamedTuple):
             until_days=args.until_days_ago,
             host=args.host,
             state=args.state,
+            agent=args.agent,
+            tmux=args.tmux,
             max_scan=args.max_scan,
             uuid=args.uuid,
             verbose=args.verbose,
@@ -491,7 +593,7 @@ def searchable_text(doc: Dict[str, Any]) -> str:
 
 def passes_filters(doc: Dict[str, Any], opts: SearchOpts,
                    cutoff_from: Optional[datetime], cutoff_until: Optional[datetime]) -> bool:
-    """Apply the --state / --host / --from / --until filters to one session."""
+    """Apply the --state / --host / --agent / --tmux / --from / --until filters to one session."""
     missing = doc.get("_source_missing", False)
     if opts.state:
         # 'deleted' is not a session_state in the index - it means the source
@@ -506,6 +608,13 @@ def passes_filters(doc: Dict[str, Any], opts: SearchOpts,
         hosts = [str(doc.get(k) or "") for k in
                  ("initial_hostname", "latest_hostname", "index_hostname")]
         if not any(opts.host.lower() in h.lower() for h in hosts):
+            return False
+
+    if opts.agent and (doc.get("agent_type") or "claude").lower() != opts.agent.lower():
+        return False
+
+    if opts.tmux:
+        if opts.tmux.lower() not in (doc.get("tmux_session") or "").lower():
             return False
 
     ts = parse_ts(doc.get("last_active", ""))
@@ -685,6 +794,15 @@ def status_block(doc: Dict[str, Any]) -> str:
     return f"{color}[ {label:<7} {time_ago(last_active)} ]{RESET}"
 
 
+def agent_block(doc: Dict[str, Any]) -> str:
+    """Agent-type tag ('[claude]'/'[codex]'), always shown and color-coded so
+    the two backends are visually distinguishable at a glance in a mixed
+    picker."""
+    agent = doc.get("agent_type") or "claude"
+    color = C_AGENT_CLAUDE if agent == "claude" else C_AGENT_CODEX
+    return f"{color}[{agent}]{RESET}"
+
+
 def host_block(doc: Dict[str, Any]) -> str:
     """The hostname segment: 'mac' in blue if local, another host in dark red."""
     latest = short_host(clean_field(doc.get("latest_hostname")))
@@ -718,7 +836,7 @@ def format_session_for_fzf(doc: Dict[str, Any], idx_path: str,
     title_str = f"\033[97m{marker + ' ' if marker else ''}{title}{RESET}"
     source_label = f"Title: {TITLE_SOURCE_LABELS[source]}" if source in TITLE_SOURCE_LABELS else ""
 
-    columns = [status_block(doc), title_str, host_block(doc)]
+    columns = [status_block(doc), title_str, agent_block(doc), host_block(doc)]
     if working_dir:
         columns.append(f"{C_DIR}{working_dir}{RESET}")
     display = "  ".join(c for c in columns if c)
@@ -913,6 +1031,78 @@ def resolve_working_dir(slug: str, verbose: bool = False) -> Optional[str]:
     return None
 
 
+# -- Claude backend adapters --------------------------------------------------
+# Thin doc-shaped wrappers around the two functions above, so they fit the
+# Backend interface (see "Agent backends" below) without changing their own
+# slug-based signatures, which nothing else needs to know about.
+
+def _claude_resolve_working_dir(doc: Dict[str, Any], verbose: bool = False) -> Optional[str]:
+    return resolve_working_dir(doc.get("slug", ""), verbose)
+
+
+def _claude_resume_cmd(doc: Dict[str, Any], transcript: Optional["Transcript"],
+                       working_dir: str, uuid: str, fork: bool) -> str:
+    """Build the `claude --resume` shell command (same logic cmd_resume always used)."""
+    perm_mode = transcript.permission_mode if transcript else None
+    title = (transcript.title if transcript else None) or doc.get("custom_title", "")
+    claude_flags = "--dangerously-skip-permissions " if perm_mode == "bypassPermissions" else ""
+    cmd = (f"cd {subprocess.list2cmdline([working_dir])} && "
+           f"claude {claude_flags}--resume {subprocess.list2cmdline([uuid])}")
+    if fork:
+        cmd += " --fork-session"
+    if title:
+        clean_title = re.sub(r'\s*\[prompt\]\s*$', '', title)
+        cmd += f" {shlex.quote('/rename ' + clean_title)}"
+    return cmd
+
+
+def _claude_uuid_of(jsonl_path: str) -> str:
+    """Claude names transcripts <uuid>.jsonl directly - the stem is the uuid."""
+    return Path(jsonl_path).stem
+
+
+# -- Codex backend adapters ---------------------------------------------------
+
+def _codex_resolve_working_dir(doc: Dict[str, Any], verbose: bool = False) -> Optional[str]:
+    """Codex records an absolute cwd directly in the transcript (build_doc
+    already copies it into these fields) - no slug-decoding needed."""
+    return doc.get("latest_working_dir") or doc.get("initial_working_dir")
+
+
+def _codex_resume_cmd(doc: Dict[str, Any], transcript: Optional["Transcript"],
+                      working_dir: str, uuid: str, fork: bool) -> str:
+    """Build the `codex resume`/`codex fork` shell command."""
+    action = "fork" if fork else "resume"
+    return f"cd {subprocess.list2cmdline([working_dir])} && codex {action} {subprocess.list2cmdline([uuid])}"
+
+
+# Codex names transcripts rollout-<timestamp>-<uuid>.jsonl - the uuid is
+# always the last 36 characters before the extension.
+_CODEX_UUID_RE = re.compile(
+    r'-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$')
+
+
+def _codex_uuid_of(jsonl_path: str) -> str:
+    m = _CODEX_UUID_RE.search(jsonl_path)
+    return m.group(1) if m else Path(jsonl_path).stem
+
+
+def scan_codex_sessions() -> Dict[str, float]:
+    """Scan all local Codex rollout .jsonl files. Returns {path: mtime}.
+
+    Codex shards sessions by date (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl)
+    rather than Claude's per-project-slug layout, hence the recursive walk.
+    """
+    d: Dict[str, float] = {}
+    root = Path(CODEX_SESSIONS_DIR)
+    if not root.exists():
+        return d
+    for f in root.rglob("*.jsonl"):
+        if f.is_file():
+            d[str(f)] = f.stat().st_mtime
+    return d
+
+
 # -- Indexing Operations ----------------------------------------------------
 
 def scan_history_jsonl() -> Dict[str, float]:
@@ -951,19 +1141,35 @@ def is_ignored_session(jsonl_path: str) -> bool:
 
     Lets users exclude sessions from specific tools/directories (e.g. an
     automated agent's own working space) without a code change - configure
-    `ignore_path_substrings` in ~/.asm/settings.json."""
+    `ignore_path_substrings` in ~/opt/agent-session-manager/data/settings.json."""
     return any(s in jsonl_path for s in IGNORE_PATH_SUBSTRINGS)
 
 
-def index_one(jsonl_path: str, idx_path: str) -> Tuple[str, str]:
-    """Index a single session. Returns (title, source).
-    source is "custom" (via /rename), "ai" (native Claude Code ai-title),
+# -- Agent backends ----------------------------------------------------------
+# The seam between "how to find/parse/resolve/resume a session for this
+# agent" (agent-specific) and everything else - search, filtering, ranking,
+# fzf display, host coloring - which already operates purely on index-doc
+# dicts and doesn't care where they came from.
+
+class Backend(NamedTuple):
+    name: str
+    scan: Callable[[], Dict[str, float]]                                  # () -> {jsonl_path: mtime}
+    parse: Callable[..., "Transcript"]                                    # (jsonl_path, warn=...) -> Transcript
+    resolve_working_dir: Callable[[Dict[str, Any], bool], Optional[str]]  # (doc, verbose) -> path
+    resume_cmd: Callable[[Dict[str, Any], Optional["Transcript"], str, str, bool], str]
+    uuid_of: Callable[[str], str]                                        # jsonl_path -> uuid
+    supports_close: bool
+
+
+def index_one(backend: Backend, jsonl_path: str, idx_path: str) -> Tuple[str, str]:
+    """Index a single session with the given backend. Returns (title, source).
+    source is "custom" (via /rename), "ai" (native ai-title),
     "empty" (no messages), or "untitled" (has messages but no title)."""
-    uuid = Path(jsonl_path).stem
-    transcript = read_transcript(jsonl_path)
+    uuid = backend.uuid_of(jsonl_path)
+    transcript = backend.parse(jsonl_path)
     lifecycle_events = list(iter_entries(Path(LIFECYCLE_DIR) / f"{uuid}.jsonl"))
 
-    doc = build_doc(uuid, transcript, lifecycle_events, jsonl_path)
+    doc = build_doc(uuid, transcript, lifecycle_events, jsonl_path, backend.name)
     write_json_atomic(doc, idx_path)
 
     return doc["custom_title"], doc["title_source"]
@@ -982,6 +1188,30 @@ def needs_reindex(uuid: str, jsonl_mtime: float, idx_mtime: Optional[float]) -> 
     return lifecycle_path.exists() and lifecycle_path.stat().st_mtime > idx_mtime
 
 
+BACKENDS: Dict[str, Backend] = {
+    "claude": Backend(
+        name="claude",
+        scan=scan_history_jsonl,
+        parse=read_transcript,
+        resolve_working_dir=_claude_resolve_working_dir,
+        resume_cmd=_claude_resume_cmd,
+        uuid_of=_claude_uuid_of,
+        supports_close=True,
+    ),
+}
+
+if CODEX_ENABLED:
+    BACKENDS["codex"] = Backend(
+        name="codex",
+        scan=scan_codex_sessions,
+        parse=read_codex_transcript,
+        resolve_working_dir=_codex_resolve_working_dir,
+        resume_cmd=_codex_resume_cmd,
+        uuid_of=_codex_uuid_of,
+        supports_close=False,  # no stable live-session surface yet, see DEV_DOC.md
+    )
+
+
 # -- Commands ---------------------------------------------------------------
 
 def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "") -> Dict[str, int]:
@@ -998,10 +1228,13 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
 
     Path(LOCAL_INDEX_DIR).mkdir(parents=True, exist_ok=True)
 
-    # -- Step 1: Scan local .jsonl history files ----------------------
-    d_history = scan_history_jsonl()
+    # -- Step 1: Scan local .jsonl history files, across all backends -
+    d_history: Dict[str, Tuple[float, Backend]] = {}
+    for backend in BACKENDS.values():
+        for p, m in backend.scan().items():
+            d_history[p] = (m, backend)
     if single_uuid:
-        d_history = {p: m for p, m in d_history.items() if Path(p).stem == single_uuid}
+        d_history = {p: v for p, v in d_history.items() if v[1].uuid_of(p) == single_uuid}
     print(f"  Step 1: {len(d_history)} .jsonl history files found", flush=True)
 
     # -- Step 2: Scan local .json index files -------------------------
@@ -1011,14 +1244,14 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
     idx_mtime_by_uuid = {Path(p).stem: mtime for p, mtime in d_index.items()}
 
     # -- Step 3a: Decide what needs reindexing ------------------------
-    to_reindex: List[Tuple[str, str]] = []  # [(jsonl_path, idx_path), ...]
+    to_reindex: List[Tuple[str, str, Backend]] = []  # [(jsonl_path, idx_path, backend), ...]
     skipped = ignored = duplicates = 0
     seen_uuids: set = set()
 
-    for jsonl_path, jsonl_mtime in d_history.items():
+    for jsonl_path, (jsonl_mtime, backend) in d_history.items():
         if max_sessions and len(seen_uuids) >= max_sessions:
             break
-        uuid = Path(jsonl_path).stem
+        uuid = backend.uuid_of(jsonl_path)
         if uuid in seen_uuids:
             duplicates += 1
             continue
@@ -1032,7 +1265,7 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
             skipped += 1
             continue
 
-        to_reindex.append((jsonl_path, os.path.join(LOCAL_INDEX_DIR, f"{uuid}.json")))
+        to_reindex.append((jsonl_path, os.path.join(LOCAL_INDEX_DIR, f"{uuid}.json"), backend))
 
     total_scanned = len(seen_uuids)
     n_to_reindex = len(to_reindex)
@@ -1056,17 +1289,17 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
             errors += 1
             print(f"    [{done}/{n_to_reindex}] {uuid[:8]}  ERROR: {exc}", file=sys.stderr, flush=True)
 
-    def worker(jsonl_path: str, idx_path: str) -> Tuple[str, Optional[Exception], str, str]:
-        uuid = Path(jsonl_path).stem
+    def worker(jsonl_path: str, idx_path: str, backend: Backend) -> Tuple[str, Optional[Exception], str, str]:
+        uuid = backend.uuid_of(jsonl_path)
         try:
-            title, source = index_one(jsonl_path, idx_path)
+            title, source = index_one(backend, jsonl_path, idx_path)
             return (uuid, None, title, source)
         except Exception as e:
             return (uuid, e, "", "")
 
     max_workers = min(10, n_to_reindex) if n_to_reindex > 0 else 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(worker, jp, ip) for jp, ip in to_reindex]
+        futures = [executor.submit(worker, jp, ip, b) for jp, ip, b in to_reindex]
         for future in as_completed(futures):
             with counter_lock:
                 report(*future.result())
@@ -1080,7 +1313,7 @@ def cmd_reindex(max_sessions: int = 0, force: bool = False, single_uuid: str = "
 # -- Sync awareness ---------------------------------------------------------
 
 def _read_sync_log_tail(max_lines: int = 200) -> List[Dict[str, Any]]:
-    """Read up to the last max_lines entries from ~/.asm/sync-log.jsonl.
+    """Read up to the last max_lines entries from ~/opt/agent-session-manager/data/sync-log.jsonl.
 
     Slices the raw lines before parsing: the log gains an entry per sync
     attempt forever, and only the tail is ever of interest.
@@ -1179,8 +1412,14 @@ def pick_session(opts: SearchOpts, action_verb: str,
 
 # -- Resume -----------------------------------------------------------------
 
-def cmd_resume(opts: SearchOpts, fork: bool = False) -> None:
-    """Find and resume a session."""
+def cmd_resume(opts: SearchOpts, fork: bool = False, print_cmd: bool = False) -> None:
+    """Find and resume a session.
+
+    print_cmd builds the exact command and prints it to stdout (nothing else)
+    instead of exec'ing it - a scriptable, non-interactive seam for tests that
+    need to assert on resume/fork command construction without ever launching
+    either agent's TUI.
+    """
     if opts.uuid:
         doc = find_by_uuid(opts.uuid)
         if not doc:
@@ -1191,6 +1430,10 @@ def cmd_resume(opts: SearchOpts, fork: bool = False) -> None:
         uuid, doc = pick_session(opts, action_verb="Resume")
 
     if doc.get("_source_missing", False):
+        if print_cmd:
+            print(f"ERROR: session {uuid} not found locally, cannot build a resume command.",
+                  file=sys.stderr)
+            sys.exit(1)
         # The .jsonl itself is gone - either deleted locally, or this doc came
         # from a machine that has never synced .jsonl files (asm-sync only ever
         # moves the index, never the transcript), so a real resume is not
@@ -1204,6 +1447,7 @@ def cmd_resume(opts: SearchOpts, fork: bool = False) -> None:
         print(f"  Open Claude and run: /inject {uuid}")
         sys.exit(0)
 
+    backend = BACKENDS.get(doc.get("agent_type") or "claude", BACKENDS["claude"])
     slug = doc.get("slug", "")
     initial_wd = doc.get("initial_working_dir", "")
     latest_wd = doc.get("latest_working_dir", "")
@@ -1211,23 +1455,27 @@ def cmd_resume(opts: SearchOpts, fork: bool = False) -> None:
     # Re-read the transcript: it holds the permission mode, and a title that
     # may be newer than the indexed one if the session was renamed since.
     jsonl_path = _resolve_jsonl_path(doc.get("jsonl_path", ""))
-    transcript = read_transcript(jsonl_path, warn=False) if jsonl_path else None
+    transcript = backend.parse(jsonl_path, warn=False) if jsonl_path else None
     perm_mode = transcript.permission_mode if transcript else None
     title = (transcript.title if transcript else None) or doc.get("custom_title", "")
 
-    working_dir = resolve_working_dir(slug, opts.verbose)
+    working_dir = backend.resolve_working_dir(doc, opts.verbose)
 
-    # -- Session info (same format used by /info skill) --
-    print("")
-    print(f"Title:              {title or '(not set)'}")
-    print(f"UUID:               {uuid}")
-    print(f"Original WD:        {initial_wd}")
-    print(f"Latest WD:          {latest_wd or initial_wd}")
-    print(f"JSONL file:         {jsonl_path or '(unknown)'}")
-    print(f"Permission mode:    {perm_mode or '(unknown)'}")
-    print(f"Selected local dir: {working_dir or '(none)'}")
+    if not print_cmd:
+        # -- Session info (same format used by /info skill) --
+        print("")
+        print(f"Title:              {title or '(not set)'}")
+        print(f"UUID:               {uuid}")
+        print(f"Original WD:        {initial_wd}")
+        print(f"Latest WD:          {latest_wd or initial_wd}")
+        print(f"JSONL file:         {jsonl_path or '(unknown)'}")
+        print(f"Permission mode:    {perm_mode or '(unknown)'}")
+        print(f"Selected local dir: {working_dir or '(none)'}")
 
     if not (working_dir and os.path.isdir(working_dir)):
+        if print_cmd:
+            print(f"ERROR: no accessible working directory for session {uuid}.", file=sys.stderr)
+            sys.exit(1)
         print("Command:            (cannot resume, directory not found)")
         print("")
         print(f"\033[33mWARNING: no accessible directory found for slug: {slug}\033[0m")
@@ -1238,17 +1486,11 @@ def cmd_resume(opts: SearchOpts, fork: bool = False) -> None:
         print("")
         return
 
-    claude_flags = "--dangerously-skip-permissions " if perm_mode == "bypassPermissions" else ""
-    cmd = (f"cd {subprocess.list2cmdline([working_dir])} && "
-           f"claude {claude_flags}--resume {subprocess.list2cmdline([uuid])}")
-    if fork:
-        cmd += " --fork-session"
+    cmd = backend.resume_cmd(doc, transcript, working_dir, uuid, fork)
 
-    # Always set the TUI header via /rename as the initial prompt. Warnings are
-    # handled separately by the lifecycle_generation.sh hook via additionalContext.
-    if title:
-        clean_title = re.sub(r'\s*\[prompt\]\s*$', '', title)
-        cmd += f" {shlex.quote('/rename ' + clean_title)}"
+    if print_cmd:
+        print(cmd)
+        return
 
     print(f"Command:            {cmd}")
     print("")
@@ -1449,8 +1691,23 @@ def _do_close(uuid: str) -> None:
 
 def cmd_close(opts: SearchOpts) -> None:
     """Find and close a running session. Same search as resume; only the
-    action after picking one differs - see _do_close."""
+    action after picking one differs - see _do_close.
+
+    Close relies entirely on ~/.claude/sessions/<pid>.json (_live_sessions())
+    to know what's actually running - Codex has no equivalent surface yet
+    (see DEV_DOC.md "Codex integration notes" #4), so a codex-tagged session
+    can never appear in the live_only picker below. --uuid bypasses the
+    picker, though, so it gets an explicit, honest check instead of falling
+    through to a "no live process" message that would misleadingly imply the
+    session simply isn't running rather than "not supported for this agent".
+    """
     if opts.uuid:
+        doc = find_by_uuid(opts.uuid)
+        backend = BACKENDS.get((doc or {}).get("agent_type") or "claude", BACKENDS["claude"])
+        if doc and not backend.supports_close:
+            print(f"ERROR: close is not supported for {backend.name} sessions yet.",
+                  file=sys.stderr)
+            sys.exit(1)
         _do_close(opts.uuid)
         return
     uuid, _ = pick_session(opts, action_verb="Close", live_only=True)
@@ -1459,41 +1716,53 @@ def cmd_close(opts: SearchOpts) -> None:
 
 # -- Main -------------------------------------------------------------------
 
-HELP = f"""asm {VERSION} - Agent Session Manager (local index)
+# Examples are written once here and filtered per-subcommand into that
+# subparser's --help epilog, instead of a hand-maintained HELP blob that
+# duplicates flag descriptions already given to argparse via add_argument().
+EXAMPLES: List[Tuple[str, str, Optional[str]]] = [
+    ("resume", "asm resume", None),
+    ("resume", "asm resume profiling hallucination", None),
+    ("resume", "asm resume -f 30 cai benchmarking", None),
+    ("resume", "asm resume --host myserver", None),
+    ("resume", "asm resume --state pending", None),
+    ("resume", "asm resume --agent codex", "only sessions from a given agent"),
+    ("resume", "asm resume --tmux mywork", 'only sessions started in tmux session "mywork"'),
+    ("resume", "asm resume --fork", "fork instead of resume"),
+    ("resume", "asm resume --uuid <uuid> --print-cmd", "print the resume command, don't run it"),
+    ("resume", "asm resume --max-scan 200", None),
+    ("resume", "asm resume -v", "with verbose logging"),
+    ("resume", "asm resume --uuid 31967223-656d-41a3-8ed3-56dbcc37ef38", "skip search, resume directly"),
+    ("close", "asm close", "browse running sessions, close the one you pick"),
+    ("close", "asm close bootstrap-home", "narrow the picker to matches first"),
+    ("close", "asm close --uuid 69959166-9792-44c3-9ee6-9f87e634a3f5", "skip search, close directly"),
+    ("reindex", "asm reindex", None),
+    ("reindex", "asm reindex -n 5", "reindex at most 5 sessions"),
+    ("reindex", "asm reindex --force", "force reindex, ignoring mtime-based skip"),
+]
+
+
+def _epilog_for(command: str) -> str:
+    """Render this command's slice of EXAMPLES as a --help epilog."""
+    rows = [(ex, note) for cmd, ex, note in EXAMPLES if cmd == command]
+    width = max(len(ex) for ex, _ in rows)
+    lines = ["Examples:"]
+    for ex, note in rows:
+        lines.append(f"  {ex.ljust(width)}   # {note}" if note else f"  {ex}")
+    return "\n".join(lines)
+
+
+TOP_DESCRIPTION = f"""asm {VERSION} - Agent Session Manager (local index)
 
   reindex → builds JSON index from local .jsonl files
-  resume  → reads from local index (~/.asm/indexes/) for fast I/O
+  resume  → reads from local index (~/opt/agent-session-manager/data/indexes/) for fast I/O
   close   → reclaims RAM from a running session, leaves it resumable
 
-Usage:
-  asm resume [OPTIONS] [KEYWORD...]   Find and resume a past session
-  asm close [OPTIONS] [KEYWORD...]    Find and close a running session
-  asm reindex [OPTIONS]               Re-index all sessions
-
-  asm --version                       Show version
-  asm --help                          Show this help
-
 'resume' and 'close' take identical search options - only the action on the
-picked session differs: resume runs `claude --resume`, close terminates it.
-Run `asm <command> --help` for the full flag list of any command.
+picked session differs: resume runs `claude --resume`/`codex resume`, close
+terminates it. 'close' only supports Claude sessions for now - Codex has no
+live-session surface yet, so it never appears in 'close's picker."""
 
-Examples:
-  asm resume
-  asm resume profiling hallucination
-  asm resume -f 30 cai benchmarking
-  asm resume --host myserver
-  asm resume --state pending
-  asm resume --fork                # fork instead of resume
-  asm resume --max-scan 200
-  asm resume -v                    # with verbose logging
-  asm resume --uuid 31967223-656d-41a3-8ed3-56dbcc37ef38   # skip search, resume directly
-  asm close                        # browse running sessions, close the one you pick
-  asm close bootstrap-home         # narrow the picker to matches first
-  asm close --uuid 69959166-9792-44c3-9ee6-9f87e634a3f5    # skip search, close directly
-  asm reindex
-  asm reindex -n 5                 # reindex at most 5 sessions
-  asm reindex --force              # force reindex, ignoring mtime-based skip
-"""
+TOP_EPILOG = "Run `asm <command> --help` for that command's full flag list and examples."
 
 
 def _add_search_args(p: argparse.ArgumentParser) -> None:
@@ -1504,6 +1773,8 @@ def _add_search_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("-u", "--until-days-ago", type=int, help="Only sessions active more than N days ago")
     p.add_argument("--host", default="", help="Filter by hostname")
     p.add_argument("--state", default="", help="Filter by session state (pending, exited, deleted)")
+    p.add_argument("--agent", default="", help=f"Filter by agent type ({', '.join(sorted(BACKENDS))})")
+    p.add_argument("--tmux", default="", help="Filter by tmux session name")
     p.add_argument("--max-scan", type=int, default=50, help="Max recent files to scan without keywords (default: 50)")
     p.add_argument("--uuid", default="", help="Skip the search, directly act on this session UUID")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
@@ -1512,43 +1783,50 @@ def _add_search_args(p: argparse.ArgumentParser) -> None:
 
 def main() -> None:
     """Main entry point."""
-    parser = argparse.ArgumentParser(prog="asm", add_help=False)
+    parser = argparse.ArgumentParser(
+        prog="asm",
+        description=TOP_DESCRIPTION,
+        epilog=TOP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"asm {VERSION}")
     subparsers = parser.add_subparsers(dest="command")
 
-    resume_parser = subparsers.add_parser("resume", help="Find and resume a past session")
+    resume_parser = subparsers.add_parser(
+        "resume", help="Find and resume a past session",
+        epilog=_epilog_for("resume"), formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_search_args(resume_parser)
     resume_parser.add_argument("--fork", action="store_true", help="Fork the session instead of resuming it")
+    resume_parser.add_argument("--print-cmd", action="store_true",
+                               help="Print the resume/fork command instead of running it (scripting/testing)")
 
-    close_parser = subparsers.add_parser("close", help="Find and close a running session (reclaims memory, leaves a resumable tombstone)")
+    close_parser = subparsers.add_parser(
+        "close", help="Find and close a running session (reclaims memory, leaves a resumable tombstone)",
+        epilog=_epilog_for("close"), formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_search_args(close_parser)
 
-    reindex_parser = subparsers.add_parser("reindex", help="Re-index all sessions now")
+    reindex_parser = subparsers.add_parser(
+        "reindex", help="Re-index all sessions now",
+        epilog=_epilog_for("reindex"), formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     reindex_parser.add_argument("-n", "--max", type=int, default=0, help="Max sessions to process (0 = unlimited, default: 0)")
     reindex_parser.add_argument("--force", action="store_true", help="Force reindex all sessions, ignoring mtime-based skip")
     reindex_parser.add_argument("--uuid", default="", help="Reindex a single session by UUID")
 
-    parser.add_argument("--version", action="store_true", help="Show version")
-    parser.add_argument("-h", "--help", action="store_true", help="Show this help")
-
     args = parser.parse_args()
 
-    if args.help or (not args.command and not args.version):
-        print(HELP, file=sys.stderr)
-        sys.exit(0 if args.help else 1)
-
-    if args.version:
-        print(f"asm {VERSION}")
-        sys.exit(0)
+    if not args.command:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
 
     if args.command == "resume":
-        cmd_resume(SearchOpts.from_args(args), args.fork)
+        cmd_resume(SearchOpts.from_args(args), args.fork, args.print_cmd)
     elif args.command == "close":
         cmd_close(SearchOpts.from_args(args))
     elif args.command == "reindex":
         cmd_reindex(args.max, args.force, args.uuid)
-    else:
-        parser.print_help(sys.stderr)
-        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Agent Session Manager (ASM)
 
-CLI tool for indexing, searching, and resuming Claude Code sessions, with optional index-only visibility across machines.
+CLI tool for indexing, searching, and resuming Claude Code **and Codex CLI** sessions through one unified picker, with optional index-only visibility across machines.
 
 - Requirements and design rationale: `DEV_DOC.md`
 - Installation and day-to-day usage: `README.md`
@@ -19,11 +19,14 @@ agent-session-manager/
 │   ├-- asm                 # the CLI executable (Python, stdlib only, local-only)
 │   ├-- asm-sync             # optional sync script (Bash, SSH/rsync to a remote host, index-only)
 │   ├-- asm-reindex-sync.sh  # scheduled-job wrapper: asm reindex, then unconditionally asm-sync
-│   ├-- settings.json        # settings template (deploys to ~/.asm/settings.json)
+│   ├-- settings.json        # settings template (deploys to ~/opt/agent-session-manager/data/settings.json)
 │   ├-- status               # standalone session info script
-│   ├-- inject/              # /inject skill for Claude Code
+│   ├-- inject/              # /inject skill - Claude Code and Codex
 │   │   └-- SKILL.md
-│   ├-- lifecycle_generation.sh  # session lifecycle hook (cross-platform)
+│   ├-- lifecycle_generation.sh  # session lifecycle hook (cross-platform, both agents)
+│   ├-- codex-plugin/        # Codex plugin: registers the same lifecycle hooks
+│   │   ├-- .codex-plugin/plugin.json
+│   │   └-- hooks/hooks.json
 │   │
 │   ├-- macos/               # macOS-specific: LaunchAgent
 │   │   └-- com.asm.reindex-sync.plist
@@ -34,15 +37,30 @@ agent-session-manager/
 
 ## Key Concepts
 
-- **Local-first**: `asm` works entirely on local disk. No shared filesystem or mount is assumed. Claude Code's own writes (`.jsonl`) go to `~/.claude/projects/`; everything ASM itself owns (index, lifecycle sidecars, settings, sync log) lives under `~/.asm/`.
-- **Optional sync, index-only**: `asm-sync` only ever moves `~/.asm/indexes/*.json` between machines over SSH/rsync - never raw `.jsonl` transcripts or lifecycle sidecars. Newest-`mtime`-wins (index files are always fully regenerated, never hand-appended, so no byte-level conflict resolution is needed). Exits silently if `remote_ssh_host` isn't configured.
+- **Pluggable backend, one picker**: everything agent-specific (session discovery, transcript parsing, working-dir resolution, resume/fork command construction) sits behind a small `Backend` interface in `src/asm`, registered in a `BACKENDS = {"claude": ..., "codex": ...}` dict. Search, ranking, fzf rendering, and host-color logic operate purely on the index-doc dict and don't know or care which backend produced it. Each indexed session carries an additive `agent_type` field (`"claude"`/`"codex"`), filterable via `--agent`. Codex support auto-detects (`~/.codex/sessions` exists) unless overridden by `codex_enabled` in settings.
+- **Local-first**: `asm` works entirely on local disk. No shared filesystem or mount is assumed. Claude Code's own writes (`.jsonl`) go to `~/.claude/projects/`; everything ASM itself owns (index, lifecycle sidecars, settings, sync log) lives under `~/opt/agent-session-manager/data/`.
+- **Optional sync, index-only**: `asm-sync` only ever moves `~/opt/agent-session-manager/data/indexes/*.json` between machines over SSH/rsync - never raw `.jsonl` transcripts or lifecycle sidecars. Newest-`mtime`-wins (index files are always fully regenerated, never hand-appended, so no byte-level conflict resolution is needed). Exits silently if `remote_ssh_host` isn't configured.
 - **Hub and spoke, not mesh**: SSH connections are always initiated by the spoke (a machine with `remote_ssh_host` set); the hub never dials out and leaves that setting empty. Three independent triggers push/pull: the `SessionEnd` hook (single session, background), an opportunistic rate-limited pull at the start of `asm resume`, and a scheduled combined reindex+sync job.
-- **Offline-resilient**: every sync attempt (success or "unreachable") is logged to `~/.asm/sync-log.jsonl`; `asm resume` warns if the last success is stale rather than either crashing offline or searching silently-stale data.
+- **Offline-resilient**: every sync attempt (success or "unreachable") is logged to `~/opt/agent-session-manager/data/sync-log.jsonl`; `asm resume` warns if the last success is stale rather than either crashing offline or searching silently-stale data.
 - **`~/opt/agent-session-manager/` is the canonical deployment location**; `~/.local/bin/{asm,asm-sync,status}` are symlinks into `~/opt/agent-session-manager/bin/`, never real files.
 - **One host, one name, one color**: hostnames are recorded and compared on their short form (`hostname -s`, no DNS domain). In the picker a host is blue when it's this machine and dark red otherwise - the only bit that matters there is "resumable vs injectable". Sessions with no lifecycle sidecar fall back to `index_hostname` (the machine that indexed them - authoritative, since `.jsonl` files never leave their machine). There is no rewrite tool for a renamed machine - a rename permanently splits that machine's history under two names in the picker.
 - **Title pipeline**: custom title (from `/rename`) > Claude Code's native `ai-title` transcript entry (auto-generated by Claude Code itself, no plugin involved) > "Untitled session [prompt]" / "[Empty session]".
 - **Pure Python, stdlib only**: no pip dependencies. Uses `json`, `pathlib`, `subprocess`, `argparse`.
 - **Mtime-based skip**: only reindexes sessions whose `.jsonl` mtime is newer than the index `.json` mtime.
+
+## Feature support by agent
+
+| Feature | Claude Code | Codex CLI |
+|---------|:-----------:|:---------:|
+| Reindex (`asm reindex`) | ✅ | ✅ |
+| Search / unified picker (`asm resume`) | ✅ | ✅ |
+| True resume (`asm resume`, picker or `--uuid`) | ✅ `claude --resume` | ✅ `codex resume` |
+| Fork (`/rename` on resume) | ✅ | ✅ `codex fork` |
+| `--agent`/`--host`/`--tmux`/`--print-cmd` filters | ✅ | ✅ |
+| Cross-machine sync (index-only) | ✅ | ✅ (same index, backend-agnostic) |
+| Lifecycle hooks (`SessionStart`/`SessionEnd`) | ✅ native hook | ✅ plugin (`codex plugin`), needs a one-time hook-trust approval |
+| `/inject` skill | ✅ | ✅ |
+| `asm close` (terminate a live session) | ✅ | ❌ - no stable public live-session surface in Codex CLI today; `asm close --uuid <codex-uuid>` fails with an explicit message rather than a misleading generic one. Not reachable from the interactive picker at all, since `live_only` filtering keys off Claude's `~/.claude/sessions/*.json` exclusively. |
 
 ## Install / Update / Uninstall
 
@@ -65,12 +83,15 @@ pick up a settings.json that already exists.
 | Artifact | Destination | Platform |
 |----------|-------------|----------|
 | `asm`, `asm-sync`, `status` | `~/opt/agent-session-manager/bin/`, symlinked from `~/.local/bin/` | All |
-| `settings.json` | `~/.asm/settings.json` | All |
-| Index | `~/.asm/indexes/` | All |
-| Lifecycle sidecars | `~/.asm/lifecycles/` | All |
-| Sync log | `~/.asm/sync-log.jsonl` | All |
-| `inject/SKILL.md` | `~/.claude/skills/inject/SKILL.md` | All |
+| `settings.json` | `~/opt/agent-session-manager/data/settings.json` | All |
+| Index | `~/opt/agent-session-manager/data/indexes/` | All |
+| Lifecycle sidecars | `~/opt/agent-session-manager/data/lifecycles/` | All |
+| Sync log | `~/opt/agent-session-manager/data/sync-log.jsonl` | All |
+| `inject/SKILL.md` | `~/.claude/skills/inject/SKILL.md` and, if Codex is detected, `~/.codex/skills/inject/SKILL.md` | All |
 | `lifecycle_generation.sh`, `asm-reindex-sync.sh`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
-| Lifecycle hooks | `~/.claude/settings.json` (auto-registered) | All |
+| Lifecycle hooks (Claude) | `~/.claude/settings.json` (auto-registered) | All |
+| Lifecycle hooks (Codex, if detected) | `codex-plugin/` deployed to `~/opt/agent-session-manager/codex-plugin/`, registered as `asm@asm-local` in `~/.codex/config.toml` via `codex plugin marketplace add` / `codex plugin add` | All |
 | Scheduled reindex+sync | `~/Library/LaunchAgents/com.asm.reindex-sync.plist` | macOS |
 | Scheduled reindex+sync | `~/.config/systemd/user/com.asm.reindex-sync.{service,timer}` (+ best-effort `loginctl enable-linger`) | Linux |
+
+Codex support is entirely additive and auto-detected (`~/.codex/sessions` present, or `codex_enabled: true` in settings): if Codex isn't installed, `install.sh` skips the plugin/skill steps for it and every codex-specific `BACKENDS` entry is simply absent.

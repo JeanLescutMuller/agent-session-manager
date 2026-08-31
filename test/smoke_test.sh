@@ -14,13 +14,23 @@
 # Usage:
 #   bash test/smoke_test.sh            # full run, including live asm-sync
 #   bash test/smoke_test.sh --offline  # skip anything that touches the network
+#   bash test/smoke_test.sh --live     # also exercise `codex plugin` install/
+#                                       # uninstall in an isolated scratch
+#                                       # CODEX_HOME (no API calls, no cost -
+#                                       # just real `codex` CLI config commands)
 #
 # Exit status: 0 if every check passed, 1 if any failed.
 
 set -uo pipefail
 
 OFFLINE=false
-[[ "${1:-}" == "--offline" ]] && OFFLINE=true
+LIVE=false
+for arg in "$@"; do
+    case "$arg" in
+        --offline) OFFLINE=true ;;
+        --live) LIVE=true ;;
+    esac
+done
 
 PASS=0
 FAIL=0
@@ -31,10 +41,12 @@ fail() { echo -e "  \033[31mFAIL\033[0m  $1"; FAIL=$((FAIL+1)); }
 warn() { echo -e "  \033[33mWARN\033[0m  $1"; WARN=$((WARN+1)); }
 section() { echo ""; echo "== $1 =="; }
 
-ASM_HOME="$HOME/.asm"
+ASM_HOME="$HOME/opt/agent-session-manager/data"
 DEPLOY_DIR="$HOME/opt/agent-session-manager"
 BIN_DIR="$DEPLOY_DIR/bin"
 LOCAL_BIN="$HOME/.local/bin"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_ASM="$REPO_ROOT/src/asm"
 
 # A non-interactive shell (e.g. `ssh host command`) doesn't source ~/.bashrc,
 # so ~/.local/bin may not be on PATH even though it is in real interactive
@@ -239,6 +251,207 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "Multi-agent backends (source checkout, install-independent)"
+
+# Runs src/asm directly rather than the deployed copy, so this section is
+# meaningful even before install.sh has been run - it tests the BACKENDS
+# abstraction itself (claude + codex), not the deployment. codex checks are
+# skipped, not failed, on a machine with no ~/.codex/sessions.
+
+python3 "$SRC_ASM" reindex >/dev/null 2>&1
+
+backend_check=$(python3 - "$SRC_ASM" <<'PYEOF' 2>&1
+import sys, json, glob, os
+from importlib.machinery import SourceFileLoader
+
+asm_mod = SourceFileLoader("asm_mod", sys.argv[1]).load_module()
+
+print(f"BACKENDS={','.join(sorted(asm_mod.BACKENDS.keys()))}")
+
+docs_by_agent = {}
+for f in glob.glob(os.path.join(asm_mod.LOCAL_INDEX_DIR, "*.json")):
+    try:
+        d = json.load(open(f))
+    except (OSError, ValueError):
+        continue
+    agent = d.get("agent_type")
+    if agent and agent not in docs_by_agent:
+        docs_by_agent[agent] = d
+
+for agent, doc in docs_by_agent.items():
+    backend = asm_mod.BACKENDS.get(agent)
+    if backend is None:
+        print(f"BACKEND_MISSING={agent}")
+        continue
+    print(f"AGENT_TYPE_FOUND={agent}")
+    wd = backend.resolve_working_dir(doc, False)
+    cmd = backend.resume_cmd(doc, None, wd or "/tmp", doc.get("session_id", ""), False)
+    print(f"RESUME_CMD={agent}:{cmd}")
+PYEOF
+)
+echo "$backend_check" | sed 's/^/    /'
+
+if echo "$backend_check" | grep -q "^BACKENDS=.*claude"; then
+    pass "claude backend registered in BACKENDS"
+else
+    fail "claude backend not registered in BACKENDS"
+fi
+
+HAS_CODEX_HISTORY=false
+[[ -d "$HOME/.codex/sessions" ]] && HAS_CODEX_HISTORY=true
+
+if $HAS_CODEX_HISTORY; then
+    if echo "$backend_check" | grep -q "^BACKENDS=.*codex"; then
+        pass "codex backend auto-enabled (~/.codex/sessions found)"
+    else
+        fail "codex backend not registered despite ~/.codex/sessions existing"
+    fi
+else
+    warn "no ~/.codex/sessions on this machine - codex backend registration not checked"
+fi
+
+if echo "$backend_check" | grep -q "^AGENT_TYPE_FOUND=claude"; then
+    pass "a real claude-indexed doc round-trips through its own backend"
+else
+    warn "no claude-indexed doc found to check agent_type on"
+fi
+
+if echo "$backend_check" | grep -qE "^RESUME_CMD=claude:.*claude --resume"; then
+    pass "claude backend builds a 'claude --resume' command"
+else
+    fail "claude backend did not build the expected 'claude --resume' command"
+fi
+
+if $HAS_CODEX_HISTORY; then
+    if echo "$backend_check" | grep -q "^AGENT_TYPE_FOUND=codex"; then
+        pass "a real codex-indexed doc round-trips through its own backend"
+    else
+        fail "no codex-indexed doc found despite ~/.codex/sessions existing"
+    fi
+    if echo "$backend_check" | grep -qE "^RESUME_CMD=codex:.*codex resume"; then
+        pass "codex backend builds a 'codex resume' command"
+    else
+        fail "codex backend did not build the expected 'codex resume' command"
+    fi
+else
+    warn "codex agent_type/resume-command checks skipped (no ~/.codex/sessions)"
+fi
+
+# ---------------------------------------------------------------------------
+section "Agent filter & --print-cmd (source checkout)"
+
+# --agent must partition the index exactly (every session is claude or codex,
+# never both, never neither) and --print-cmd must build the right command per
+# backend without ever touching os.execv - this is what makes the assertions
+# below possible without launching either agent's TUI.
+
+agent_check=$(python3 - "$SRC_ASM" <<'PYEOF' 2>&1
+import sys, subprocess, importlib.util
+from importlib.machinery import SourceFileLoader
+
+src_asm = sys.argv[1]
+asm_mod = SourceFileLoader("asm_mod", src_asm).load_module()
+
+opts_all = asm_mod.SearchOpts(keywords=[], from_days=3650, max_scan=100000)
+total = len(asm_mod.find_sessions(opts_all)[0])
+
+counts = {}
+for agent in asm_mod.BACKENDS:
+    opts = asm_mod.SearchOpts(keywords=[], from_days=3650, max_scan=100000, agent=agent)
+    sessions, _ = asm_mod.find_sessions(opts)
+    counts[agent] = len(sessions)
+    bad = [d for d, _ in sessions if (d.get("agent_type") or "claude") != agent]
+    print(f"AGENT_COUNT={agent}:{len(sessions)}")
+    print(f"AGENT_LEAK={agent}:{len(bad)}")
+
+print(f"TOTAL={total}")
+print(f"SUM_BY_AGENT={sum(counts.values())}")
+
+for agent, opts_backend in asm_mod.BACKENDS.items():
+    opts = asm_mod.SearchOpts(keywords=[], from_days=3650, max_scan=1, agent=agent)
+    sessions, _ = asm_mod.find_sessions(opts)
+    if not sessions:
+        continue
+    doc, _ = sessions[0]
+    out = subprocess.run(
+        [sys.executable, src_asm, "resume", "--uuid", doc["session_id"], "--print-cmd"],
+        capture_output=True, text=True,
+    )
+    print(f"PRINTCMD_RC={agent}:{out.returncode}")
+    print(f"PRINTCMD_OUT={agent}:{out.stdout.strip()}")
+PYEOF
+)
+echo "$agent_check" | sed 's/^/    /'
+
+if echo "$agent_check" | grep -q "^SUM_BY_AGENT=" && \
+   [[ "$(echo "$agent_check" | sed -n 's/^TOTAL=//p')" == "$(echo "$agent_check" | sed -n 's/^SUM_BY_AGENT=//p')" ]]; then
+    pass "--agent counts sum to the unfiltered total (partition is exact)"
+else
+    fail "--agent counts do not sum to the unfiltered total"
+fi
+
+if echo "$agent_check" | grep -qE "^AGENT_LEAK=(claude|codex):0$" && \
+   ! echo "$agent_check" | grep -qE "^AGENT_LEAK=(claude|codex):[1-9]"; then
+    pass "--agent never returns a session tagged with a different agent_type"
+else
+    fail "--agent leaked a session with a mismatched agent_type"
+fi
+
+if echo "$agent_check" | grep -qE "^PRINTCMD_RC=claude:0$" && \
+   echo "$agent_check" | grep -qE "^PRINTCMD_OUT=claude:.*claude --resume"; then
+    pass "--print-cmd builds a 'claude --resume' command and exits 0"
+else
+    warn "no claude session available to check --print-cmd on"
+fi
+
+if echo "$agent_check" | grep -q "^PRINTCMD_RC=codex:"; then
+    if echo "$agent_check" | grep -qE "^PRINTCMD_RC=codex:0$" && \
+       echo "$agent_check" | grep -qE "^PRINTCMD_OUT=codex:.*codex resume"; then
+        pass "--print-cmd builds a 'codex resume' command and exits 0"
+    else
+        fail "--print-cmd did not build the expected 'codex resume' command"
+    fi
+else
+    warn "no codex session available to check --print-cmd on"
+fi
+
+# ---------------------------------------------------------------------------
+section "Close parity (documented gap for codex, source checkout)"
+
+# Codex has no live-session surface yet (see DEV_DOC.md "Codex integration
+# notes" #4), so `asm close` must fail loudly and clearly on a codex-tagged
+# --uuid rather than a misleading generic error or a crash.
+
+close_check=$(python3 - "$SRC_ASM" <<'PYEOF' 2>&1
+import sys, json, glob, os
+from importlib.machinery import SourceFileLoader
+
+asm_mod = SourceFileLoader("asm_mod", sys.argv[1]).load_module()
+for f in glob.glob(os.path.join(asm_mod.LOCAL_INDEX_DIR, "*.json")):
+    try:
+        d = json.load(open(f))
+    except (OSError, ValueError):
+        continue
+    if d.get("agent_type") == "codex":
+        print(d["session_id"])
+        break
+PYEOF
+)
+codex_uuid=$(echo "$close_check" | tail -1)
+
+if [[ -n "$codex_uuid" ]]; then
+    close_out=$(python3 "$SRC_ASM" close --uuid "$codex_uuid" 2>&1)
+    close_rc=$?
+    if [[ $close_rc -ne 0 ]] && echo "$close_out" | grep -qi "not supported for codex"; then
+        pass "'asm close --uuid <codex session>' fails with a clear, documented message"
+    else
+        fail "'asm close --uuid <codex session>' did not fail with the expected message (rc=$close_rc): $close_out"
+    fi
+else
+    warn "no codex session available to check close-parity messaging on"
+fi
+
+# ---------------------------------------------------------------------------
 section "Search (find_sessions, headless - no fzf)"
 
 search_result=$(python3 - <<'PYEOF' 2>&1
@@ -261,7 +474,7 @@ def usable_keyword(path):
     title = (idx.get("custom_title") or "").replace("(auto-generated)", "").strip()
     return next((w for w in title.split() if len(w) > 3 and w.isalnum()), None)
 
-indexes = sorted(glob.glob(os.path.expanduser("~/.asm/indexes/*.json")),
+indexes = sorted(glob.glob(os.path.expanduser("~/opt/agent-session-manager/data/indexes/*.json")),
                  key=os.path.getmtime, reverse=True)
 uuid = keyword = None
 for path in indexes:
@@ -384,6 +597,14 @@ fi
 # ---------------------------------------------------------------------------
 section "Lifecycle hook (simulated, isolated test UUID)"
 
+# This exercises lifecycle_generation.sh with a raw {session_id,
+# transcript_path, cwd} stdin JSON payload - confirmed live (Phase 0 spike,
+# DEV_DOC.md "Codex integration notes") to be byte-for-byte the same shape
+# Codex delivers on SessionStart/SessionEnd, so this section validates both
+# agents' hook contract at once without needing a real `codex exec` call
+# here too. See --live below for the part that's actually Codex-specific:
+# whether `codex plugin`-based install/uninstall itself works.
+
 TEST_UUID="00000000-test-smoke-0000-$(date +%s)"
 TEST_SIDECAR="$ASM_HOME/lifecycles/${TEST_UUID}.jsonl"
 cleanup_lifecycle() { rm -f "$TEST_SIDECAR"; }
@@ -417,6 +638,84 @@ fi
 
 cleanup_lifecycle
 trap - EXIT
+
+# ---------------------------------------------------------------------------
+if $LIVE; then
+section "Codex plugin install/uninstall round-trip (--live, isolated CODEX_HOME)"
+
+# Runs the *exact* Codex-plugin block from install.sh/uninstall.sh (extracted
+# by line range, not retyped, so this can't silently drift from the real
+# script) against a scratch $CODEX_HOME - never the real
+# ~/.codex/config.toml. No API calls happen here (codex plugin
+# marketplace/add/remove are local config commands only), so this is cheap
+# and safe to run anytime `codex` is installed.
+
+if ! command -v codex &>/dev/null; then
+    warn "codex not installed - skipping --live Codex plugin round-trip"
+else
+    LIVE_SCRATCH=$(mktemp -d)
+    cleanup_live() { rm -rf "$LIVE_SCRATCH"; }
+    trap cleanup_live EXIT
+
+    mkdir -p "$LIVE_SCRATCH/.codex" "$LIVE_SCRATCH/opt/agent-session-manager/bin"
+    cp "$HOME/.codex/auth.json" "$LIVE_SCRATCH/.codex/auth.json" 2>/dev/null || true
+    echo 'model = "gpt-5"' > "$LIVE_SCRATCH/.codex/config.toml"
+    cp "$SRC_ASM" "$LIVE_SCRATCH/opt/agent-session-manager/bin/asm"
+
+    install_block=$(sed -n '/^# -- Codex plugin: same lifecycle hooks/,/^fi$/p' "$REPO_ROOT/install.sh")
+    uninstall_block=$(sed -n '/^# -- Remove Codex plugin/,/^fi$/p' "$REPO_ROOT/uninstall.sh")
+
+    # install.sh computes $CODEX_PRESENT once, upstream of the extracted
+    # block, from asm's own CODEX_ENABLED plus `command -v codex`; supply it
+    # directly here the same way SERVICE_DIR/SRC_DIR/OPT_BIN_DIR are supplied
+    # below, rather than re-deriving it (this scratch home has no
+    # ~/.codex/sessions of its own for auto-detect to find anyway).
+    run_in_scratch() {
+        HOME="$LIVE_SCRATCH" CODEX_HOME="$LIVE_SCRATCH/.codex" \
+        SERVICE_DIR="$LIVE_SCRATCH/opt/agent-session-manager" \
+        SRC_DIR="$REPO_ROOT/src" \
+        OPT_BIN_DIR="$LIVE_SCRATCH/opt/agent-session-manager/bin" \
+        CODEX_PRESENT=true \
+        bash -c "set -euo pipefail; $1"
+    }
+
+    run_in_scratch "$install_block" >/dev/null 2>&1
+    run_in_scratch "$install_block" >/dev/null 2>&1   # 2nd run: idempotency
+    cfg="$LIVE_SCRATCH/.codex/config.toml"
+
+    n_marketplace=$(grep -c '^\[marketplaces\.asm-local\]' "$cfg" 2>/dev/null || echo 0)
+    n_plugin=$(grep -c '^\[plugins\."asm@asm-local"\]' "$cfg" 2>/dev/null || echo 0)
+    if [[ "$n_marketplace" == "1" && "$n_plugin" == "1" ]]; then
+        pass "two consecutive installs leave exactly one marketplace + plugin entry"
+    else
+        fail "install is not idempotent: marketplace=$n_marketplace plugin=$n_plugin entries (expected 1 each)"
+        cat "$cfg" | sed 's/^/    /'
+    fi
+
+    run_in_scratch "$uninstall_block" >/dev/null 2>&1
+    if grep -q "asm-local\|asm@asm-local" "$cfg" 2>/dev/null; then
+        fail "uninstall did not remove the asm-local marketplace/plugin entries"
+        cat "$cfg" | sed 's/^/    /'
+    else
+        pass "uninstall removes the marketplace + plugin entries cleanly"
+    fi
+
+    # /inject skill: install.sh must additionally copy SKILL.md into
+    # ~/.codex/skills/ (a separate directory from Claude's, so no collision)
+    # whenever $CODEX_PRESENT.
+    inject_block=$(sed -n '/^# -- inject skill/,/^fi$/p' "$REPO_ROOT/install.sh")
+    run_in_scratch "$inject_block" >/dev/null 2>&1
+    if [[ -f "$LIVE_SCRATCH/.codex/skills/inject/SKILL.md" ]] && \
+       [[ -f "$LIVE_SCRATCH/.claude/skills/inject/SKILL.md" ]]; then
+        pass "inject skill installed under both ~/.claude/skills/ and ~/.codex/skills/"
+    else
+        fail "inject skill missing from ~/.claude/skills/ and/or ~/.codex/skills/"
+    fi
+
+    cleanup_live
+    trap - EXIT
+fi
+fi
 
 # ---------------------------------------------------------------------------
 section "Summary"

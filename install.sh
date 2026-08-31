@@ -6,11 +6,14 @@
 #   ~/.local/bin/                         - PATH entry points, symlinked into the above
 #   ~/.claude/skills/inject/SKILL.md      - /inject skill
 #   ~/opt/agent-session-manager/         - service scripts + logs (canonical location)
-#   ~/.asm/                               - settings, index, lifecycle sidecars, sync log
+#   ~/opt/agent-session-manager/data/     - settings, index, lifecycle sidecars, sync log
 #   ~/Library/LaunchAgents/ (macOS) or
 #     ~/.config/systemd/user/ (Linux)     - symlink only; real plist/unit files
 #                                           live in ~/opt/agent-session-manager/
 #   ~/.claude/settings.json               - lifecycle hooks (auto-registered)
+#   ~/.codex/config.toml                  - lifecycle hooks, if Codex is detected
+#                                           (registered as a plugin via `codex plugin`,
+#                                           requires a one-time trust approval on first run)
 #
 # First install:
 #   git clone <repo-url> && cd agent-session-manager && bash install.sh
@@ -57,7 +60,7 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-mkdir -p "$HOME/.asm"
+mkdir -p "$SERVICE_DIR/data"
 
 # -- Service scripts -> ~/opt/agent-session-manager/ ----------
 
@@ -113,20 +116,37 @@ case ":$PATH:" in
         ;;
 esac
 
-# -- settings.json -> ~/.asm/ --------------------------------------------------
+# -- settings.json -> ~/opt/agent-session-manager/data/ ----------------------
 
-if [ ! -f "$HOME/.asm/settings.json" ]; then
-    cp "$SRC_DIR/settings.json" "$HOME/.asm/settings.json"
-    echo "  $HOME/.asm/settings.json (created - fill in remote_ssh_* to enable sync)"
+if [ ! -f "$SERVICE_DIR/data/settings.json" ]; then
+    cp "$SRC_DIR/settings.json" "$SERVICE_DIR/data/settings.json"
+    echo "  $SERVICE_DIR/data/settings.json (created - fill in remote_ssh_* to enable sync)"
 else
-    echo "  $HOME/.asm/settings.json (already exists, not overwritten)"
+    echo "  $SERVICE_DIR/data/settings.json (already exists, not overwritten)"
 fi
 
-# -- inject skill -> ~/.claude/skills/inject/ ---------------------------------
+# Settings are in place now, so this reflects any codex_enabled override the
+# user already had - reused below for both the inject skill and the plugin
+# registration, rather than re-detecting Codex twice.
+CODEX_ENABLED=$(python3 -c "
+from importlib.machinery import SourceFileLoader
+m = SourceFileLoader('asm_mod', '$OPT_BIN_DIR/asm').load_module()
+print('true' if m.CODEX_ENABLED else 'false')
+" 2>/dev/null || echo false)
+CODEX_PRESENT=false
+[ "$CODEX_ENABLED" = "true" ] && command -v codex &>/dev/null && CODEX_PRESENT=true
+
+# -- inject skill -> ~/.claude/skills/inject/ (+ ~/.codex/skills/ if Codex) ---
 
 mkdir -p "$HOME/.claude/skills/inject"
 cp "$SRC_DIR/inject/SKILL.md" "$HOME/.claude/skills/inject/SKILL.md"
 echo "  $HOME/.claude/skills/inject/SKILL.md"
+
+if $CODEX_PRESENT; then
+    mkdir -p "$HOME/.codex/skills/inject"
+    cp "$SRC_DIR/inject/SKILL.md" "$HOME/.codex/skills/inject/SKILL.md"
+    echo "  $HOME/.codex/skills/inject/SKILL.md"
+fi
 
 # -- Clean up old /info skill (replaced by ~/.local/bin/status) --------------
 
@@ -259,6 +279,64 @@ PYEOF
 else
     echo "  WARNING: $SETTINGS_JSON not found, skipping hook registration"
     echo "  You may need to register hooks manually after Claude Code is set up."
+fi
+
+# -- Codex plugin: same lifecycle hooks, registered a different way ----------
+#
+# Codex has no single settings.json to hand-edit; hooks are shipped as a
+# plugin (src/codex-plugin/) published through a local marketplace, both
+# registered into ~/.codex/config.toml by Codex's own `codex plugin`
+# subcommands - real, non-interactive, and safe to re-run (confirmed live:
+# both commands are idempotent, exit 0 and leave config.toml unchanged on a
+# second run). The hook payload Codex delivers on SessionStart/SessionEnd is
+# byte-for-byte the same shape Claude Code's is (session_id, transcript_path,
+# cwd via stdin JSON) - confirmed live - so it points at the exact same
+# lifecycle_generation.sh above, unmodified.
+#
+# Reuses $CODEX_PRESENT computed above (asm's own CODEX_ENABLED, auto-detect
+# or the codex_enabled override in ~/opt/agent-session-manager/data/settings.json, plus `codex` being
+# on $PATH) rather than re-implementing that detection here.
+
+if $CODEX_PRESENT; then
+    CODEX_PLUGIN_DIR="$SERVICE_DIR/codex-plugin"
+    rm -rf "$CODEX_PLUGIN_DIR"
+    mkdir -p "$CODEX_PLUGIN_DIR"
+    cp -R "$SRC_DIR/codex-plugin/." "$CODEX_PLUGIN_DIR/"
+    echo "  $CODEX_PLUGIN_DIR"
+
+    CODEX_MARKET_DIR="$SERVICE_DIR/codex-marketplace"
+    mkdir -p "$CODEX_MARKET_DIR/.agents/plugins" "$CODEX_MARKET_DIR/plugins"
+    ln -sf "$CODEX_PLUGIN_DIR" "$CODEX_MARKET_DIR/plugins/asm"
+    cat > "$CODEX_MARKET_DIR/.agents/plugins/marketplace.json" <<EOF
+{
+  "name": "asm-local",
+  "interface": {"displayName": "ASM Local"},
+  "plugins": [
+    {
+      "name": "asm",
+      "source": {"source": "local", "path": "./plugins/asm"},
+      "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+      "category": "Productivity"
+    }
+  ]
+}
+EOF
+
+    if MARKET_OUT=$(codex plugin marketplace add "$CODEX_MARKET_DIR" 2>&1) && \
+       PLUGIN_OUT=$(codex plugin add asm@asm-local 2>&1); then
+        echo "  asm@asm-local registered in ~/.codex/config.toml"
+        echo "  NOTE: Codex requires a one-time trust approval before hooks actually run."
+        echo "        Start any 'codex' session and approve asm's hooks when prompted -"
+        echo "        this only happens once."
+    else
+        echo "  WARNING: could not register the Codex plugin:"
+        echo "$MARKET_OUT" | sed 's/^/    /'
+        echo "${PLUGIN_OUT:-}" | sed 's/^/    /'
+        echo "  Run manually: codex plugin marketplace add \"$CODEX_MARKET_DIR\" && codex plugin add asm@asm-local"
+    fi
+else
+    echo "  Codex not detected or disabled - skipping Codex lifecycle hooks"
+    echo "    (Claude Code's lifecycle hooks above are unaffected)"
 fi
 
 echo ""
