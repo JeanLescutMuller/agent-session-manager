@@ -17,25 +17,32 @@ IS_MACOS=$( [[ "$(uname -s)" == "Darwin" ]] && echo true || echo false )
 echo "Uninstalling Agent Session Manager..."
 echo ""
 
-# -- Remove scheduled reindex+sync job ---------------------------------------
+# -- Remove scheduled reindex + rsync job -------------------------------------
 
-if $IS_MACOS; then
-    LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-    plist_path="$LAUNCH_AGENTS/com.asm.reindex-sync.plist"
-    if [ -f "$plist_path" ]; then
-        launchctl unload "$plist_path" 2>/dev/null || true
-        rm "$plist_path"
-        echo "  Removed $plist_path"
-    fi
-else
-    SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-    if command -v systemctl &>/dev/null && [ -f "$SYSTEMD_USER_DIR/com.asm.reindex-sync.timer" ]; then
-        systemctl --user disable --now com.asm.reindex-sync.timer 2>/dev/null || true
-        rm -f "$SYSTEMD_USER_DIR/com.asm.reindex-sync.service" "$SYSTEMD_USER_DIR/com.asm.reindex-sync.timer"
-        systemctl --user daemon-reload 2>/dev/null || true
-        echo "  Removed $SYSTEMD_USER_DIR/com.asm.reindex-sync.{service,timer}"
-    fi
+# Scheduled by smart-orchestrator through a symlink; also clear any former
+# launchd / systemd scheduling left by older installs.
+if [ -L "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf" ]; then
+    rm -f "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
+    echo "  Removed $HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
 fi
+for name in com.asm.reindex-sync com.csm.reindex-sync; do
+    if $IS_MACOS; then
+        plist_path="$HOME/Library/LaunchAgents/$name.plist"
+        if [ -e "$plist_path" ] || [ -L "$plist_path" ]; then
+            launchctl unload "$plist_path" 2>/dev/null || true
+            rm -f "$plist_path"
+            echo "  Removed $plist_path"
+        fi
+    else
+        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+        if command -v systemctl &>/dev/null && [ -e "$SYSTEMD_USER_DIR/$name.timer" ]; then
+            systemctl --user disable --now "$name.timer" 2>/dev/null || true
+            rm -f "$SYSTEMD_USER_DIR/$name.service" "$SYSTEMD_USER_DIR/$name.timer"
+            systemctl --user daemon-reload 2>/dev/null || true
+            echo "  Removed $SYSTEMD_USER_DIR/$name.{service,timer}"
+        fi
+    fi
+done
 
 # -- Remove asm, asm-sync, status --------------------------------------------
 

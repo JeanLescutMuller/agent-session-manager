@@ -91,7 +91,7 @@ for f in asm asm-sync status; do
     fi
 done
 
-for f in lifecycle_generation.sh asm-reindex-sync.sh install.sh uninstall.sh; do
+for f in lifecycle_generation.sh asm-reindex-and-rsync.sh smart-orchestrator.conf install.sh uninstall.sh; do
     [[ -f "$DEPLOY_DIR/$f" ]] && pass "$DEPLOY_DIR/$f present" || fail "$DEPLOY_DIR/$f missing"
 done
 
@@ -109,7 +109,7 @@ if [[ -d "$REPO_DIR/src" ]]; then
             diff -q "$REPO_DIR/src/$f" "$BIN_DIR/$f" &>/dev/null || drift=1
         fi
     done
-    for f in lifecycle_generation.sh asm-reindex-sync.sh install.sh uninstall.sh; do
+    for f in lifecycle_generation.sh asm-reindex-and-rsync.sh smart-orchestrator.conf install.sh uninstall.sh; do
         if [[ -f "$REPO_DIR/src/$f" && -f "$DEPLOY_DIR/$f" ]]; then
             diff -q "$REPO_DIR/src/$f" "$DEPLOY_DIR/$f" &>/dev/null || drift=1
         elif [[ -f "$REPO_DIR/$f" && -f "$DEPLOY_DIR/$f" ]]; then
@@ -144,21 +144,19 @@ else
     fail "~/.claude/settings.json not found"
 fi
 
-# Scheduler
-if [[ "$(uname -s)" == "Darwin" ]]; then
-    if launchctl list 2>/dev/null | grep -q com.asm.reindex-sync; then
-        pass "launchd job com.asm.reindex-sync is loaded"
-    else
-        fail "launchd job com.asm.reindex-sync not loaded (launchctl list)"
-    fi
-    [[ -f "$HOME/Library/LaunchAgents/com.asm.reindex-sync.plist" ]] \
-        && pass "LaunchAgent plist present" || fail "LaunchAgent plist missing"
+# Scheduler: smart-orchestrator (separate project) reads the job through a symlink
+SO_JOB="$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
+if [[ -L "$SO_JOB" && -f "$SO_JOB" ]]; then
+    pass "smart-orchestrator job $SO_JOB -> $(readlink "$SO_JOB")"
 else
-    if systemctl --user is-enabled com.asm.reindex-sync.timer &>/dev/null; then
-        pass "systemd --user timer com.asm.reindex-sync.timer is enabled"
-    else
-        fail "systemd --user timer not enabled (systemctl --user status com.asm.reindex-sync.timer)"
+    fail "smart-orchestrator job missing or broken: $SO_JOB (re-run install.sh)"
+fi
+for name in com.asm.reindex-sync com.csm.reindex-sync; do
+    if [[ -e "$HOME/Library/LaunchAgents/$name.plist" || -e "$HOME/.config/systemd/user/$name.timer" ]]; then
+        fail "former scheduling $name still present: the job would run twice (re-run install.sh)"
     fi
+done
+if [[ "$(uname -s)" != "Darwin" ]]; then
     if loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
         pass "loginctl linger enabled (timer survives logout)"
     else

@@ -271,11 +271,11 @@ Optionally: confirm by checking whether the PID recorded in the `start` event is
 
 | Component | Type | When invoked |
 |---|---|---|
-| `asm reindex` | Python script | scheduled, as part of `asm-reindex-sync.sh` below |
+| `asm reindex` | Python script | scheduled, as part of `asm-reindex-and-rsync.sh` below |
 | `lifecycle_generation.sh` | shell script | Claude Code hooks (SessionStart / SessionEnd), and the Codex plugin below - same script, same trigger events |
 | `codex-plugin/` | Codex plugin | registered via `codex plugin`; wires Codex's SessionStart/SessionEnd to `lifecycle_generation.sh` |
-| `asm-sync` | shell script | trigger 1: backgrounded on `SessionEnd`; trigger 2: opportunistically at the start of `asm resume`; trigger 3: scheduled, as part of `asm-reindex-sync.sh`; always a no-op if no remote configured |
-| `asm-reindex-sync.sh` | shell script | scheduled (`launchd` on macOS, `systemd --user` timer on Linux) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
+| `asm-sync` | shell script | trigger 1: backgrounded on `SessionEnd`; trigger 2: opportunistically at the start of `asm resume`; trigger 3: scheduled, as part of `asm-reindex-and-rsync.sh`; always a no-op if no remote configured |
+| `asm-reindex-and-rsync.sh` | shell script | scheduled by smart-orchestrator (`smart-orchestrator.conf`) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
 | `asm` | shell script | terminal, before opening the agent (`asm resume`, `asm reindex`, …) |
 | `~/.claude/skills/inject/SKILL.md`, `~/.codex/skills/inject/SKILL.md` | skill | inside an active Claude Code or Codex session |
 
@@ -314,7 +314,7 @@ Reconciles **only** `~/opt/agent-session-manager/data/indexes/*.json` between th
 **Three triggers, kept independent on purpose** (separate failure modes, easy to tell apart in logs):
 1. `SessionEnd` hook - reindex the session that just ended, push its one index entry. Backgrounded, non-blocking.
 2. Start of `asm resume` - rate-limited (skipped if attempted <60s ago) opportunistic pull, hard-capped at a few seconds via a subprocess timeout, wrapped so it can never crash or hang the interactive command.
-3. `asm-reindex-sync.sh`, scheduled (`launchd`/`systemd --user timer`, every 30 min) - `asm reindex` then unconditionally `asm-sync` (both directions). Reindex failing must never skip the sync step, so this wrapper explicitly ignores reindex's exit status rather than chaining under `set -e`.
+3. `asm-reindex-and-rsync.sh`, scheduled by smart-orchestrator (every ~30 min) - `asm reindex` then unconditionally `asm-sync` (both directions). Reindex failing must never skip the sync step, so this wrapper explicitly ignores reindex's exit status rather than chaining under `set -e`.
 
 ### R6.5: `asm resume`
 
@@ -354,7 +354,7 @@ Skill for context injection when true resume is not possible, identical content 
 | `asm` (`reindex`/`resume`) | R1/R6.2/R6.5: reads Claude Code `.jsonl` and Codex `.jsonl` via the `BACKENDS` registry + `~/opt/agent-session-manager/data/lifecycles/*.jsonl`, writes JSON index; search + fzf + exec resume/fork command |
 | `lifecycle_generation.sh` | R2: hook body, shared verbatim by both Claude Code's native hook and the Codex plugin below; writes `~/opt/agent-session-manager/data/lifecycles/<uuid>.jsonl` sidecar files |
 | `asm-sync` | R6.4: optional SSH-based sync of `~/opt/agent-session-manager/data/indexes/` only, between two machines (agent-agnostic - syncs both backends' index entries identically) |
-| `asm-reindex-sync.sh` | R6.4: scheduled wrapper - `asm reindex` then unconditionally `asm-sync` |
+| `asm-reindex-and-rsync.sh` | R6.4: scheduled wrapper - `asm reindex` then unconditionally `asm-sync` |
 | `codex-plugin/` (`.codex-plugin/plugin.json` + `hooks/hooks.json`) | R2: Codex plugin manifest, registered as `asm@asm-local` - wires the same `lifecycle_generation.sh` into Codex's `SessionStart`/`SessionEnd` |
 | `~/.claude/skills/inject/SKILL.md`, `~/.codex/skills/inject/SKILL.md` (if Codex detected) | R6.6: skill for context injection, identical content for both agents |
 
@@ -362,8 +362,7 @@ Skill for context injection when true resume is not possible, identical content 
 
 | Device | Files | Purpose |
 |---|---|---|
-| macOS | `~/Library/LaunchAgents/com.asm.reindex-sync.plist` | runs `asm-reindex-sync.sh` every 30 min via `launchd` |
-| Linux | `~/.config/systemd/user/com.asm.reindex-sync.{service,timer}` | same, via `systemd --user` timer (`OnCalendar=*:0/30`) |
+| All | `~/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf` (symlink to the deployed `smart-orchestrator.conf`) | smart-orchestrator checks it every 10 min and runs `asm-reindex-and-rsync.sh` when the last success is older than 30 min |
 
 The Linux unit files use systemd's native `%h` home-directory specifier, so unlike the macOS `.plist` they need no `sed` templating at install time. `install.sh` also best-effort runs `loginctl enable-linger` on Linux - without it, the user's systemd instance (and thus the timer) may only run while a session/SSH login is active, which matters for a VM you don't keep permanently logged into.
 
@@ -398,7 +397,7 @@ Every machine is fully local and self-contained - no mounts, no symlinks to shar
 | `~/opt/agent-session-manager/data/lifecycles/` | real local directory (written by `lifecycle_generation.sh`, shared by both agents' hooks) |
 | `~/opt/agent-session-manager/data/settings.json` | ASM's own settings |
 | `~/opt/agent-session-manager/data/sync-log.jsonl` | append-only sync-attempt log |
-| `~/opt/agent-session-manager/` | canonical deployment location - `bin/{asm,asm-sync,status}`, `lifecycle_generation.sh`, `asm-reindex-sync.sh`, `codex-plugin/`, `install.sh`/`uninstall.sh` copies, and `data/` (above) |
+| `~/opt/agent-session-manager/` | canonical deployment location - `bin/{asm,asm-sync,status}`, `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `codex-plugin/`, `install.sh`/`uninstall.sh` copies, and `data/` (above) |
 | `~/.local/bin/{asm,asm-sync,status}` | symlinks into `~/opt/agent-session-manager/bin/` - the only thing on `$PATH`, never real files |
 
 `uninstall.sh` removes everything under `~/opt/agent-session-manager/` **except** `data/`, since code and data now share one parent directory - see its own header comment.

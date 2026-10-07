@@ -1,6 +1,0 @@
-[Unit]
-Description=ASM: reindex local Claude Code sessions, then sync with remote
-
-[Service]
-Type=oneshot
-ExecStart=%h/opt/agent-session-manager/asm-reindex-sync.sh

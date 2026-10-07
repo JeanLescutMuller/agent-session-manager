@@ -26,8 +26,6 @@ set -euo pipefail
 # Resolve source directory (where this script lives)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
-MACOS_DIR="$SRC_DIR/macos"
-LINUX_DIR="$SRC_DIR/linux"
 
 SERVICE_DIR="$HOME/opt/agent-session-manager"
 SETTINGS_JSON="$HOME/.claude/settings.json"
@@ -71,9 +69,10 @@ cp "$SRC_DIR/lifecycle_generation.sh" "$SERVICE_DIR/lifecycle_generation.sh"
 chmod +x "$SERVICE_DIR/lifecycle_generation.sh"
 echo "  $SERVICE_DIR/lifecycle_generation.sh"
 
-cp "$SRC_DIR/asm-reindex-sync.sh" "$SERVICE_DIR/asm-reindex-sync.sh"
-chmod +x "$SERVICE_DIR/asm-reindex-sync.sh"
-echo "  $SERVICE_DIR/asm-reindex-sync.sh"
+cp "$SRC_DIR/asm-reindex-and-rsync.sh" "$SERVICE_DIR/asm-reindex-and-rsync.sh"
+chmod +x "$SERVICE_DIR/asm-reindex-and-rsync.sh"
+rm -f "$SERVICE_DIR/asm-reindex-sync.sh"  # former name
+echo "  $SERVICE_DIR/asm-reindex-and-rsync.sh"
 
 for script in install.sh uninstall.sh; do
     cp "$SCRIPT_DIR/$script" "$SERVICE_DIR/$script"
@@ -157,73 +156,37 @@ fi
 
 # -- Scheduled reindex + sync ---------------------------------------------------
 
-if $IS_MACOS; then
-    # macOS: launchd. Templated at install time - the source plist ships with
-    # placeholders since the wrapper-script path and log dir are per-user ($HOME).
-    # The real file lives in $SERVICE_DIR (~/opt/...) alongside everything else
-    # ASM owns; ~/Library/LaunchAgents/ only ever holds a symlink to it, same
-    # convention as ~/.local/bin/asm symlinking into $SERVICE_DIR/bin/.
-    LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-    mkdir -p "$LAUNCH_AGENTS"
+# Scheduled by smart-orchestrator (separate project, ~/opt/smart-orchestrator): the job's
+# config ships with ASM and is deployed here; smart-orchestrator reads it through a
+# symlink, the same way ~/Library/LaunchAgents/ only holds symlinks into ~/opt/.
+cp "$SRC_DIR/smart-orchestrator.conf" "$SERVICE_DIR/smart-orchestrator.conf"
+echo "  $SERVICE_DIR/smart-orchestrator.conf"
 
-    plist="com.asm.reindex-sync.plist"
-    REAL_PLIST="$SERVICE_DIR/$plist"
-    LINK_PLIST="$LAUNCH_AGENTS/$plist"
-
-    # A prior install may have written a real file straight into LaunchAgents
-    # (pre-symlink layout) - unload and clear it before switching to a symlink.
-    if [ -e "$LINK_PLIST" ] && [ ! -L "$LINK_PLIST" ]; then
-        launchctl unload "$LINK_PLIST" 2>/dev/null || true
-        rm -f "$LINK_PLIST"
+# Self-migrating: remove the former launchd / systemd scheduling of this job
+# (com.csm.* is the name from before the claude -> agent-session-manager rename).
+for name in com.asm.reindex-sync com.csm.reindex-sync; do
+    if $IS_MACOS; then
+        if [ -e "$HOME/Library/LaunchAgents/$name.plist" ] || [ -L "$HOME/Library/LaunchAgents/$name.plist" ]; then
+            launchctl unload "$HOME/Library/LaunchAgents/$name.plist" 2>/dev/null || true
+            rm -f "$HOME/Library/LaunchAgents/$name.plist" "$SERVICE_DIR/$name.plist"
+            echo "  Removed former scheduling: $name (launchd)"
+        fi
+    elif command -v systemctl &>/dev/null && { [ -e "$HOME/.config/systemd/user/$name.timer" ] || [ -L "$HOME/.config/systemd/user/$name.timer" ]; }; then
+        systemctl --user disable --now "$name.timer" 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/$name.service" "$HOME/.config/systemd/user/$name.timer" \
+              "$SERVICE_DIR/$name.service" "$SERVICE_DIR/$name.timer"
+        systemctl --user daemon-reload 2>/dev/null || true
+        echo "  Removed former scheduling: $name (systemd)"
     fi
+done
 
-    sed -e "s|__WRAPPER_SCRIPT__|$SERVICE_DIR/asm-reindex-sync.sh|g" -e "s|__LOG_DIR__|$SERVICE_DIR|g" \
-        "$MACOS_DIR/$plist" > "$REAL_PLIST"
-    ln -sf "$REAL_PLIST" "$LINK_PLIST"
-    launchctl unload "$LINK_PLIST" 2>/dev/null || true
-    launchctl load "$LINK_PLIST"
-    echo "  $REAL_PLIST  (symlinked from $LINK_PLIST, loaded)"
+SO_JOBS="$HOME/opt/smart-orchestrator/jobs"
+if [ -d "$SO_JOBS" ]; then
+    ln -sfn "$SERVICE_DIR/smart-orchestrator.conf" "$SO_JOBS/asm-reindex-and-rsync.conf"
+    echo "  $SO_JOBS/asm-reindex-and-rsync.conf -> $SERVICE_DIR/smart-orchestrator.conf (checked every 10 min)"
 else
-    # Linux: systemd --user timer. Unit files use systemd's native %h
-    # specifier for the home directory, so no templating is needed here.
-    # Real files live in $SERVICE_DIR; ~/.config/systemd/user/ only holds
-    # symlinks to them, mirroring the macOS layout above.
-    if command -v systemctl &>/dev/null; then
-        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-        mkdir -p "$SYSTEMD_USER_DIR"
-
-        for unit in com.asm.reindex-sync.service com.asm.reindex-sync.timer; do
-            REAL_UNIT="$SERVICE_DIR/$unit"
-            LINK_UNIT="$SYSTEMD_USER_DIR/$unit"
-            cp "$LINUX_DIR/$unit" "$REAL_UNIT"
-            # A prior install may have written a real file here directly
-            # (pre-symlink layout) - clear it before switching to a symlink.
-            [ -e "$LINK_UNIT" ] && [ ! -L "$LINK_UNIT" ] && rm -f "$LINK_UNIT"
-            ln -sf "$REAL_UNIT" "$LINK_UNIT"
-        done
-
-        if systemctl --user daemon-reload 2>/dev/null && \
-           systemctl --user enable --now com.asm.reindex-sync.timer 2>/dev/null; then
-            echo "  $SERVICE_DIR/com.asm.reindex-sync.{service,timer}  (symlinked from $SYSTEMD_USER_DIR, enabled)"
-        else
-            echo "  WARNING: could not enable the systemd timer. Run manually later:"
-            echo "    systemctl --user daemon-reload && systemctl --user enable --now com.asm.reindex-sync.timer"
-        fi
-
-        if command -v loginctl &>/dev/null; then
-            if loginctl enable-linger "$(whoami)" 2>/dev/null; then
-                echo "  Lingering enabled for $(whoami) (scheduled job runs even without an active session)"
-            else
-                echo "  NOTE: could not enable lingering (loginctl enable-linger $(whoami))."
-                echo "        Without it, the scheduled reindex+sync job may only run while you"
-                echo "        have an active session/SSH login. Ask your admin, or run it yourself:"
-                echo "          loginctl enable-linger $(whoami)"
-            fi
-        fi
-    else
-        echo "  NOTE: systemd not found - scheduled reindex+sync not set up automatically."
-        echo "        Run $SERVICE_DIR/asm-reindex-sync.sh via cron yourself if you want scheduling."
-    fi
+    echo "  NOTE: smart-orchestrator is not installed ($SO_JOBS missing): reindex + rsync is not scheduled."
+    echo "        Install it (github.com/JeanLescutMuller/smart-orchestrator), then re-run this install."
 fi
 
 # -- Register lifecycle hooks in settings.json --------------------------------
