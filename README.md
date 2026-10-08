@@ -212,7 +212,7 @@ This must be set on each machine independently. (Codex CLI's own session-retenti
 
 ## Technical Details
 
-- Pure Python (stdlib only, no pip dependencies) for `asm`; plain Bash for `asm-sync`, the lifecycle hook, and the scheduled `asm-reindex-and-rsync.sh` (run by [smart-orchestrator](https://github.com/JeanLescutMuller/smart-orchestrator)) wrapper
+- Pure Python (stdlib only, no pip dependencies) for `asm`; plain Bash for `asm-sync`, the lifecycle hook, and the scheduled `asm-reindex-and-rsync.sh` (run by [multi-host-orchestrator](https://github.com/JeanLescutMuller/multi-host-orchestrator)) wrapper
 - Parallel reindexing with 10 concurrent workers
 - Incremental: skips sessions unchanged since last index (mtime comparison)
 - Titles come from `/rename` (custom) or Claude Code's own native `ai-title` - no separate title-generation plugin needed

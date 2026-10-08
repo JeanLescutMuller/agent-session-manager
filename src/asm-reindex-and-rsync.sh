@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# asm-reindex-and-rsync.sh - scheduled job (run by smart-orchestrator, see
-# smart-orchestrator.conf): reindex, then rsync the index with the remote host.
+# asm-reindex-and-rsync.sh - scheduled job (run by multi-host-orchestrator, see
+# multi-host-orchestrator.conf): reindex, then rsync the index with the remote host.
 #
 # Deployed alongside this script, under bin/: asm, asm-sync. Uses absolute
 # paths rather than relying on $PATH, since schedulers invoke this with a
@@ -10,7 +10,7 @@
 # has its own independent success/failure handling (and logs to
 # ~/opt/agent-session-manager/data/sync-log.jsonl), so it must always get a chance to run.
 # The exit code still reports both: 0 only if both steps succeeded, so a failure
-# shows on the smart-orchestrator dashboard instead of being hidden.
+# shows on the multi-host-orchestrator dashboard instead of being hidden.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

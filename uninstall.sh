@@ -19,11 +19,11 @@ echo ""
 
 # -- Remove scheduled reindex + rsync job -------------------------------------
 
-# Scheduled by smart-orchestrator through a symlink; also clear any former
+# Scheduled by multi-host-orchestrator through a symlink; also clear any former
 # launchd / systemd scheduling left by older installs.
-if [ -L "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf" ]; then
-    rm -f "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
-    echo "  Removed $HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
+if [ -L "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" ]; then
+    rm -f "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
+    echo "  Removed $HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
 fi
 for name in com.asm.reindex-sync com.csm.reindex-sync; do
     if $IS_MACOS; then

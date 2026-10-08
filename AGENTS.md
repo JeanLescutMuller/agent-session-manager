@@ -19,7 +19,7 @@ agent-session-manager/
 │   ├-- asm                 # the CLI executable (Python, stdlib only, local-only)
 │   ├-- asm-sync             # optional sync script (Bash, SSH/rsync to a remote host, index-only)
 │   ├-- asm-reindex-and-rsync.sh  # scheduled-job wrapper: asm reindex, then unconditionally asm-sync; fails if either failed
-│   ├-- smart-orchestrator.conf   # the job's schedule, read by smart-orchestrator (separate project)
+│   ├-- multi-host-orchestrator.conf   # the job's schedule, read by multi-host-orchestrator (separate project)
 │   ├-- settings.json        # settings template (deploys to ~/opt/agent-session-manager/data/settings.json)
 │   ├-- status               # standalone session info script
 │   ├-- inject/              # /inject skill - Claude Code and Codex
@@ -35,7 +35,7 @@ agent-session-manager/
 - **Pluggable backend, one picker**: everything agent-specific (session discovery, transcript parsing, working-dir resolution, resume/fork command construction) sits behind a small `Backend` interface in `src/asm`, registered in a `BACKENDS = {"claude": ..., "codex": ...}` dict. Search, ranking, fzf rendering, and host-color logic operate purely on the index-doc dict and don't know or care which backend produced it. Each indexed session carries an additive `agent_type` field (`"claude"`/`"codex"`), filterable via `--agent`. Codex support auto-detects (`~/.codex/sessions` exists) unless overridden by `codex_enabled` in settings.
 - **Local-first**: `asm` works entirely on local disk. No shared filesystem or mount is assumed. Claude Code's own writes (`.jsonl`) go to `~/.claude/projects/`; everything ASM itself owns (index, lifecycle sidecars, settings, sync log) lives under `~/opt/agent-session-manager/data/`.
 - **Optional sync, index-only**: `asm-sync` only ever moves `~/opt/agent-session-manager/data/indexes/*.json` between machines over SSH/rsync - never raw `.jsonl` transcripts or lifecycle sidecars. Newest-`mtime`-wins (index files are always fully regenerated, never hand-appended, so no byte-level conflict resolution is needed). Exits silently if `remote_ssh_host` isn't configured.
-- **Hub and spoke, not mesh**: SSH connections are always initiated by the spoke (a machine with `remote_ssh_host` set); the hub never dials out and leaves that setting empty. Three independent triggers push/pull: the `SessionEnd` hook (single session, background), an opportunistic rate-limited pull at the start of `asm resume`, and a scheduled combined reindex + rsync job (run by smart-orchestrator every ~30 min).
+- **Hub and spoke, not mesh**: SSH connections are always initiated by the spoke (a machine with `remote_ssh_host` set); the hub never dials out and leaves that setting empty. Three independent triggers push/pull: the `SessionEnd` hook (single session, background), an opportunistic rate-limited pull at the start of `asm resume`, and a scheduled combined reindex + rsync job (run by multi-host-orchestrator every ~30 min).
 - **Offline-resilient**: every sync attempt (success or "unreachable") is logged to `~/opt/agent-session-manager/data/sync-log.jsonl`; `asm resume` warns if the last success is stale rather than either crashing offline or searching silently-stale data.
 - **`~/opt/agent-session-manager/` is the canonical deployment location**; `~/.local/bin/{asm,asm-sync,status}` are symlinks into `~/opt/agent-session-manager/bin/`, never real files.
 - **One host, one name, one color**: hostnames are recorded and compared on their short form (`hostname -s`, no DNS domain). In the picker a host is blue when it's this machine and dark red otherwise - the only bit that matters there is "resumable vs injectable". Sessions with no lifecycle sidecar fall back to `index_hostname` (the machine that indexed them - authoritative, since `.jsonl` files never leave their machine). There is no rewrite tool for a renamed machine - a rename permanently splits that machine's history under two names in the picker.
@@ -83,9 +83,9 @@ pick up a settings.json that already exists.
 | Lifecycle sidecars | `~/opt/agent-session-manager/data/lifecycles/` | All |
 | Sync log | `~/opt/agent-session-manager/data/sync-log.jsonl` | All |
 | `inject/SKILL.md` | `~/.claude/skills/inject/SKILL.md` and, if Codex is detected, `~/.codex/skills/inject/SKILL.md` | All |
-| `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `smart-orchestrator.conf`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
+| `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `multi-host-orchestrator.conf`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
 | Lifecycle hooks (Claude) | `~/.claude/settings.json` (auto-registered) | All |
 | Lifecycle hooks (Codex, if detected) | `codex-plugin/` deployed to `~/opt/agent-session-manager/codex-plugin/`, registered as `asm@asm-local` in `~/.codex/config.toml` via `codex plugin marketplace add` / `codex plugin add` | All |
-| Scheduled reindex + rsync | `~/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf` → `~/opt/agent-session-manager/smart-orchestrator.conf` (symlink; smart-orchestrator checks it every 10 min, runs it every 30 min; former `com.{asm,csm}.reindex-sync` launchd/systemd units are removed by `install.sh`) | All |
+| Scheduled reindex + rsync | `~/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf` → `~/opt/agent-session-manager/multi-host-orchestrator.conf` (symlink; multi-host-orchestrator checks it every 10 min, runs it every 30 min; former `com.{asm,csm}.reindex-sync` launchd/systemd units are removed by `install.sh`) | All |
 
 Codex support is entirely additive and auto-detected (`~/.codex/sessions` present, or `codex_enabled: true` in settings): if Codex isn't installed, `install.sh` skips the plugin/skill steps for it and every codex-specific `BACKENDS` entry is simply absent.

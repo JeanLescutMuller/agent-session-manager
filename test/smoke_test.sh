@@ -91,7 +91,7 @@ for f in asm asm-sync status; do
     fi
 done
 
-for f in lifecycle_generation.sh asm-reindex-and-rsync.sh smart-orchestrator.conf install.sh uninstall.sh; do
+for f in lifecycle_generation.sh asm-reindex-and-rsync.sh multi-host-orchestrator.conf install.sh uninstall.sh; do
     [[ -f "$DEPLOY_DIR/$f" ]] && pass "$DEPLOY_DIR/$f present" || fail "$DEPLOY_DIR/$f missing"
 done
 
@@ -109,7 +109,7 @@ if [[ -d "$REPO_DIR/src" ]]; then
             diff -q "$REPO_DIR/src/$f" "$BIN_DIR/$f" &>/dev/null || drift=1
         fi
     done
-    for f in lifecycle_generation.sh asm-reindex-and-rsync.sh smart-orchestrator.conf install.sh uninstall.sh; do
+    for f in lifecycle_generation.sh asm-reindex-and-rsync.sh multi-host-orchestrator.conf install.sh uninstall.sh; do
         if [[ -f "$REPO_DIR/src/$f" && -f "$DEPLOY_DIR/$f" ]]; then
             diff -q "$REPO_DIR/src/$f" "$DEPLOY_DIR/$f" &>/dev/null || drift=1
         elif [[ -f "$REPO_DIR/$f" && -f "$DEPLOY_DIR/$f" ]]; then
@@ -144,12 +144,12 @@ else
     fail "~/.claude/settings.json not found"
 fi
 
-# Scheduler: smart-orchestrator (separate project) reads the job through a symlink
-SO_JOB="$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
-if [[ -L "$SO_JOB" && -f "$SO_JOB" ]]; then
-    pass "smart-orchestrator job $SO_JOB -> $(readlink "$SO_JOB")"
+# Scheduler: multi-host-orchestrator (separate project) reads the job through a symlink
+MHO_JOB="$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
+if [[ -L "$MHO_JOB" && -f "$MHO_JOB" ]]; then
+    pass "multi-host-orchestrator job $MHO_JOB -> $(readlink "$MHO_JOB")"
 else
-    fail "smart-orchestrator job missing or broken: $SO_JOB (re-run install.sh)"
+    fail "multi-host-orchestrator job missing or broken: $MHO_JOB (re-run install.sh)"
 fi
 for name in com.asm.reindex-sync com.csm.reindex-sync; do
     if [[ -e "$HOME/Library/LaunchAgents/$name.plist" || -e "$HOME/.config/systemd/user/$name.timer" ]]; then

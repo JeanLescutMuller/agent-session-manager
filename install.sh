@@ -156,11 +156,13 @@ fi
 
 # -- Scheduled reindex + sync ---------------------------------------------------
 
-# Scheduled by smart-orchestrator (separate project, ~/opt/smart-orchestrator): the job's
-# config ships with ASM and is deployed here; smart-orchestrator reads it through a
+# Scheduled by multi-host-orchestrator (separate project, ~/opt/multi-host-orchestrator): the job's
+# config ships with ASM and is deployed here; multi-host-orchestrator reads it through a
 # symlink, the same way ~/Library/LaunchAgents/ only holds symlinks into ~/opt/.
-cp "$SRC_DIR/smart-orchestrator.conf" "$SERVICE_DIR/smart-orchestrator.conf"
-echo "  $SERVICE_DIR/smart-orchestrator.conf"
+cp "$SRC_DIR/multi-host-orchestrator.conf" "$SERVICE_DIR/multi-host-orchestrator.conf"
+echo "  $SERVICE_DIR/multi-host-orchestrator.conf"
+# Self-migrating: the scheduler was named smart-orchestrator until 2026-10-08
+rm -f "$SERVICE_DIR/smart-orchestrator.conf" "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
 
 # Self-migrating: remove the former launchd / systemd scheduling of this job
 # (com.csm.* is the name from before the claude -> agent-session-manager rename).
@@ -180,13 +182,13 @@ for name in com.asm.reindex-sync com.csm.reindex-sync; do
     fi
 done
 
-SO_JOBS="$HOME/opt/smart-orchestrator/jobs"
-if [ -d "$SO_JOBS" ]; then
-    ln -sfn "$SERVICE_DIR/smart-orchestrator.conf" "$SO_JOBS/asm-reindex-and-rsync.conf"
-    echo "  $SO_JOBS/asm-reindex-and-rsync.conf -> $SERVICE_DIR/smart-orchestrator.conf (checked every 10 min)"
+MHO_JOBS="$HOME/opt/multi-host-orchestrator/jobs"
+if [ -d "$MHO_JOBS" ]; then
+    ln -sfn "$SERVICE_DIR/multi-host-orchestrator.conf" "$MHO_JOBS/asm-reindex-and-rsync.conf"
+    echo "  $MHO_JOBS/asm-reindex-and-rsync.conf -> $SERVICE_DIR/multi-host-orchestrator.conf (checked every 10 min)"
 else
-    echo "  NOTE: smart-orchestrator is not installed ($SO_JOBS missing): reindex + rsync is not scheduled."
-    echo "        Install it (github.com/JeanLescutMuller/smart-orchestrator), then re-run this install."
+    echo "  NOTE: multi-host-orchestrator is not installed ($MHO_JOBS missing): reindex + rsync is not scheduled."
+    echo "        Install it (github.com/JeanLescutMuller/multi-host-orchestrator), then re-run this install."
 fi
 
 # -- Register lifecycle hooks in settings.json --------------------------------
