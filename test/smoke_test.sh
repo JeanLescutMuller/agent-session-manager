@@ -146,7 +146,7 @@ fi
 
 # Scheduler: this machine's trigger runs multi-host-orchestrator (separate project) on mho_var.sh every 30 min
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    launchctl list 2>/dev/null | grep -q "com.jeanlescut.agent-session-manager$" \
+    launchctl list com.jeanlescut.agent-session-manager >/dev/null 2>&1 \
         && pass "LaunchAgent com.jeanlescut.agent-session-manager loaded" || fail "LaunchAgent com.jeanlescut.agent-session-manager not loaded (re-run install.sh)"
 else
     systemctl --user is-active --quiet com.jeanlescut.agent-session-manager.timer \
