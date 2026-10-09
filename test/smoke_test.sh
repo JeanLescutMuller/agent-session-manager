@@ -146,17 +146,17 @@ fi
 
 # Scheduler: this machine's trigger runs multi-host-orchestrator (separate project) on mho_var.sh every 30 min
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    launchctl list 2>/dev/null | grep -q "com.asm.reindex-and-rsync$" \
-        && pass "LaunchAgent com.asm.reindex-and-rsync loaded" || fail "LaunchAgent com.asm.reindex-and-rsync not loaded (re-run install.sh)"
+    launchctl list 2>/dev/null | grep -q "com.jeanlescut.agent-session-manager$" \
+        && pass "LaunchAgent com.jeanlescut.agent-session-manager loaded" || fail "LaunchAgent com.jeanlescut.agent-session-manager not loaded (re-run install.sh)"
 else
-    systemctl --user is-active --quiet asm-reindex-and-rsync.timer \
-        && pass "systemd timer asm-reindex-and-rsync active" || fail "systemd timer asm-reindex-and-rsync not active (re-run install.sh)"
+    systemctl --user is-active --quiet com.jeanlescut.agent-session-manager.timer \
+        && pass "systemd timer com.jeanlescut.agent-session-manager active" || fail "systemd timer com.jeanlescut.agent-session-manager not active (re-run install.sh)"
 fi
 [[ -x "$HOME/opt/multi-host-orchestrator/mho_entrypoint.sh" ]] \
     && pass "multi-host-orchestrator installed" || fail "multi-host-orchestrator missing: ~/opt/multi-host-orchestrator/mho_entrypoint.sh"
 [[ ! -e "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" ]] \
     || fail "the former job link jobs/asm-reindex-and-rsync.conf is still there (re-run install.sh)"
-for name in com.asm.reindex-sync com.csm.reindex-sync; do
+for name in com.asm.reindex-sync com.csm.reindex-sync com.asm.reindex-and-rsync asm-reindex-and-rsync; do
     if [[ -e "$HOME/Library/LaunchAgents/$name.plist" || -e "$HOME/.config/systemd/user/$name.timer" ]]; then
         fail "former scheduling $name still present: the job would run twice (re-run install.sh)"
     fi
