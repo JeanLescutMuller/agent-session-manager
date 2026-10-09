@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # asm-reindex-and-rsync.sh - scheduled job (run by multi-host-orchestrator, see
-# multi-host-orchestrator.conf): reindex, then rsync the index with the remote host.
+# mho_var.sh): reindex, then rsync the index with the remote host.
 #
 # Deployed alongside this script, under bin/: asm, asm-sync. Uses absolute
 # paths rather than relying on $PATH, since schedulers invoke this with a

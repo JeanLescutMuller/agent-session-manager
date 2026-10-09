@@ -19,7 +19,7 @@ agent-session-manager/
 │   ├-- asm                 # the CLI executable (Python, stdlib only, local-only)
 │   ├-- asm-sync             # optional sync script (Bash, SSH/rsync to a remote host, index-only)
 │   ├-- asm-reindex-and-rsync.sh  # scheduled-job wrapper: asm reindex, then unconditionally asm-sync; fails if either failed
-│   ├-- multi-host-orchestrator.conf   # the job's schedule, read by multi-host-orchestrator (separate project)
+│   ├-- mho_var.sh            # the job for multi-host-orchestrator (separate project): when it runs, what it runs
 │   ├-- settings.json        # settings template (deploys to ~/opt/agent-session-manager/data/settings.json)
 │   ├-- status               # standalone session info script
 │   ├-- inject/              # /inject skill - Claude Code and Codex
@@ -83,9 +83,9 @@ pick up a settings.json that already exists.
 | Lifecycle sidecars | `~/opt/agent-session-manager/data/lifecycles/` | All |
 | Sync log | `~/opt/agent-session-manager/data/sync-log.jsonl` | All |
 | `inject/SKILL.md` | `~/.claude/skills/inject/SKILL.md` and, if Codex is detected, `~/.codex/skills/inject/SKILL.md` | All |
-| `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `multi-host-orchestrator.conf`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
+| `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `mho_var.sh`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
 | Lifecycle hooks (Claude) | `~/.claude/settings.json` (auto-registered) | All |
 | Lifecycle hooks (Codex, if detected) | `codex-plugin/` deployed to `~/opt/agent-session-manager/codex-plugin/`, registered as `asm@asm-local` in `~/.codex/config.toml` via `codex plugin marketplace add` / `codex plugin add` | All |
-| Scheduled reindex + rsync | `~/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf` → `~/opt/agent-session-manager/multi-host-orchestrator.conf` (symlink; multi-host-orchestrator checks it every 10 min, runs it every 30 min; former `com.{asm,csm}.reindex-sync` launchd/systemd units are removed by `install.sh`) | All |
+| Scheduled reindex + rsync | `mho_var.sh` (the job for multi-host-orchestrator) started every 10 min by `com.asm.reindex-and-rsync` (LaunchAgent, macOS) or `asm-reindex-and-rsync.timer` (systemd user, Linux): real files in `~/opt/agent-session-manager/`, symlinks where the OS looks; the job runs at most every 30 min, online only. Former schedulings (the `.conf` linked into multi-host-orchestrator, `com.{asm,csm}.reindex-sync`) are removed by `install.sh` | All |
 
 Codex support is entirely additive and auto-detected (`~/.codex/sessions` present, or `codex_enabled: true` in settings): if Codex isn't installed, `install.sh` skips the plugin/skill steps for it and every codex-specific `BACKENDS` entry is simply absent.

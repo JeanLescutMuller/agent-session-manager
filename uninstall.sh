@@ -19,13 +19,9 @@ echo ""
 
 # -- Remove scheduled reindex + rsync job -------------------------------------
 
-# Scheduled by multi-host-orchestrator through a symlink; also clear any former
-# launchd / systemd scheduling left by older installs.
-if [ -L "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" ]; then
-    rm -f "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
-    echo "  Removed $HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
-fi
-for name in com.asm.reindex-sync com.csm.reindex-sync; do
+# Its trigger (run through multi-host-orchestrator), and any former scheduling left by older installs.
+rm -f "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
+for name in com.asm.reindex-and-rsync asm-reindex-and-rsync com.asm.reindex-sync com.csm.reindex-sync; do
     if $IS_MACOS; then
         plist_path="$HOME/Library/LaunchAgents/$name.plist"
         if [ -e "$plist_path" ] || [ -L "$plist_path" ]; then

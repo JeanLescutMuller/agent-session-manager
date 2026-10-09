@@ -156,13 +156,14 @@ fi
 
 # -- Scheduled reindex + sync ---------------------------------------------------
 
-# Scheduled by multi-host-orchestrator (separate project, ~/opt/multi-host-orchestrator): the job's
-# config ships with ASM and is deployed here; multi-host-orchestrator reads it through a
-# symlink, the same way ~/Library/LaunchAgents/ only holds symlinks into ~/opt/.
-cp "$SRC_DIR/multi-host-orchestrator.conf" "$SERVICE_DIR/multi-host-orchestrator.conf"
-echo "  $SERVICE_DIR/multi-host-orchestrator.conf"
-# Self-migrating: the scheduler was named smart-orchestrator until 2026-10-08
-rm -f "$SERVICE_DIR/smart-orchestrator.conf" "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
+# Run through multi-host-orchestrator (separate project, ~/opt/multi-host-orchestrator): this machine's own
+# scheduler starts its mho_entrypoint.sh on mho_var.sh every 10 min; mho_var.sh says when the job really
+# runs (at most every 30 min, online only). Real plist / unit files here, symlinks where the OS looks.
+cp "$SRC_DIR/mho_var.sh" "$SERVICE_DIR/mho_var.sh"
+echo "  $SERVICE_DIR/mho_var.sh"
+# Self-migrating: the job files of the Python multi-host-orchestrator (until 2026-10-09) and of smart-orchestrator
+rm -f "$SERVICE_DIR/multi-host-orchestrator.conf" "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" \
+      "$SERVICE_DIR/smart-orchestrator.conf" "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
 
 # Self-migrating: remove the former launchd / systemd scheduling of this job
 # (com.csm.* is the name from before the claude -> agent-session-manager rename).
@@ -182,14 +183,33 @@ for name in com.asm.reindex-sync com.csm.reindex-sync; do
     fi
 done
 
-MHO_JOBS="$HOME/opt/multi-host-orchestrator/jobs"
-if [ -d "$MHO_JOBS" ]; then
-    ln -sfn "$SERVICE_DIR/multi-host-orchestrator.conf" "$MHO_JOBS/asm-reindex-and-rsync.conf"
-    echo "  $MHO_JOBS/asm-reindex-and-rsync.conf -> $SERVICE_DIR/multi-host-orchestrator.conf (checked every 10 min)"
-else
-    echo "  NOTE: multi-host-orchestrator is not installed ($MHO_JOBS missing): reindex + rsync is not scheduled."
-    echo "        Install it (github.com/JeanLescutMuller/multi-host-orchestrator), then re-run this install."
+MHO="$HOME/opt/multi-host-orchestrator/mho_entrypoint.sh"
+if $IS_MACOS; then
+    LABEL=com.asm.reindex-and-rsync
+    cat > "$SERVICE_DIR/$LABEL.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$MHO</string><string>$SERVICE_DIR/mho_var.sh</string></array>
+  <key>StartInterval</key><integer>600</integer><key>RunAtLoad</key><true/><key>AbandonProcessGroup</key><true/>
+</dict></plist>
+PLIST
+    ln -sfn "$SERVICE_DIR/$LABEL.plist" "$HOME/Library/LaunchAgents/$LABEL.plist"
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist" && echo "  LaunchAgent $LABEL (every 10 min)"
+elif command -v systemctl &>/dev/null; then
+    UNIT=asm-reindex-and-rsync
+    printf '[Unit]\nDescription=asm: reindex + rsync (through multi-host-orchestrator)\n[Service]\nType=oneshot\nExecStart=/bin/bash %s %s\nKillMode=process\nTimeoutStartSec=infinity\n' \
+        "$MHO" "$SERVICE_DIR/mho_var.sh" > "$SERVICE_DIR/$UNIT.service"
+    printf '[Unit]\nDescription=asm: reindex + rsync every 10 min\n[Timer]\nOnActiveSec=1min\nOnUnitActiveSec=10min\nPersistent=true\n[Install]\nWantedBy=timers.target\n' > "$SERVICE_DIR/$UNIT.timer"
+    mkdir -p "$HOME/.config/systemd/user"
+    ln -sfn "$SERVICE_DIR/$UNIT.service" "$HOME/.config/systemd/user/$UNIT.service"
+    ln -sfn "$SERVICE_DIR/$UNIT.timer" "$HOME/.config/systemd/user/$UNIT.timer"
+    systemctl --user daemon-reload && systemctl --user enable --now "$UNIT.timer" 2>/dev/null && echo "  systemd timer $UNIT (every 10 min)"
+    loginctl enable-linger "$USER" 2>/dev/null || true
 fi
+[ -x "$MHO" ] || echo "  NOTE: multi-host-orchestrator is not installed ($MHO missing): the trigger runs nothing until it is (github.com/JeanLescutMuller/multi-host-orchestrator)."
 
 # -- Register lifecycle hooks in settings.json --------------------------------
 

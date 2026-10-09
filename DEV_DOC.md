@@ -275,7 +275,7 @@ Optionally: confirm by checking whether the PID recorded in the `start` event is
 | `lifecycle_generation.sh` | shell script | Claude Code hooks (SessionStart / SessionEnd), and the Codex plugin below - same script, same trigger events |
 | `codex-plugin/` | Codex plugin | registered via `codex plugin`; wires Codex's SessionStart/SessionEnd to `lifecycle_generation.sh` |
 | `asm-sync` | shell script | trigger 1: backgrounded on `SessionEnd`; trigger 2: opportunistically at the start of `asm resume`; trigger 3: scheduled, as part of `asm-reindex-and-rsync.sh`; always a no-op if no remote configured |
-| `asm-reindex-and-rsync.sh` | shell script | scheduled by multi-host-orchestrator (`multi-host-orchestrator.conf`) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
+| `asm-reindex-and-rsync.sh` | shell script | scheduled through multi-host-orchestrator (`mho_var.sh`) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
 | `asm` | shell script | terminal, before opening the agent (`asm resume`, `asm reindex`, …) |
 | `~/.claude/skills/inject/SKILL.md`, `~/.codex/skills/inject/SKILL.md` | skill | inside an active Claude Code or Codex session |
 
@@ -362,7 +362,8 @@ Skill for context injection when true resume is not possible, identical content 
 
 | Device | Files | Purpose |
 |---|---|---|
-| All | `~/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf` (symlink to the deployed `multi-host-orchestrator.conf`) | multi-host-orchestrator checks it every 10 min and runs `asm-reindex-and-rsync.sh` when the last success is older than 30 min |
+| macOS | `~/Library/LaunchAgents/com.asm.reindex-and-rsync.plist` (symlink to `~/opt/agent-session-manager/`) | starts `~/opt/multi-host-orchestrator/mho_entrypoint.sh mho_var.sh` every 10 min; it runs `asm-reindex-and-rsync.sh` when online and the last success is older than 30 min |
+| Linux | `~/.config/systemd/user/asm-reindex-and-rsync.{service,timer}` (symlinks to `~/opt/agent-session-manager/`) | the same, every 10 min |
 
 The Linux unit files use systemd's native `%h` home-directory specifier, so unlike the macOS `.plist` they need no `sed` templating at install time. `install.sh` also best-effort runs `loginctl enable-linger` on Linux - without it, the user's systemd instance (and thus the timer) may only run while a session/SSH login is active, which matters for a VM you don't keep permanently logged into.
 
