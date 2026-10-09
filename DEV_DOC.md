@@ -362,8 +362,8 @@ Skill for context injection when true resume is not possible, identical content 
 
 | Device | Files | Purpose |
 |---|---|---|
-| macOS | `~/Library/LaunchAgents/com.asm.reindex-and-rsync.plist` (symlink to `~/opt/agent-session-manager/`) | starts `~/opt/multi-host-orchestrator/mho_entrypoint.sh mho_var.sh` every 10 min; it runs `asm-reindex-and-rsync.sh` when online and the last success is older than 30 min |
-| Linux | `~/.config/systemd/user/asm-reindex-and-rsync.{service,timer}` (symlinks to `~/opt/agent-session-manager/`) | the same, every 10 min |
+| macOS | `~/Library/LaunchAgents/com.asm.reindex-and-rsync.plist` (symlink to `~/opt/agent-session-manager/`) | starts `~/opt/multi-host-orchestrator/mho_entrypoint.sh mho_var.sh` every 30 min (the whole schedule); mho runs `asm-reindex-and-rsync.sh` with a 20-min timeout and records it for the dashboard |
+| Linux | `~/.config/systemd/user/asm-reindex-and-rsync.{service,timer}` (symlinks to `~/opt/agent-session-manager/`) | the same, every 30 min |
 
 The Linux unit files use systemd's native `%h` home-directory specifier, so unlike the macOS `.plist` they need no `sed` templating at install time. `install.sh` also best-effort runs `loginctl enable-linger` on Linux - without it, the user's systemd instance (and thus the timer) may only run while a session/SSH login is active, which matters for a VM you don't keep permanently logged into.
 

@@ -144,7 +144,7 @@ else
     fail "~/.claude/settings.json not found"
 fi
 
-# Scheduler: this machine's trigger runs multi-host-orchestrator (separate project) on mho_var.sh every 10 min
+# Scheduler: this machine's trigger runs multi-host-orchestrator (separate project) on mho_var.sh every 30 min
 if [[ "$(uname -s)" == "Darwin" ]]; then
     launchctl list 2>/dev/null | grep -q "com.asm.reindex-and-rsync$" \
         && pass "LaunchAgent com.asm.reindex-and-rsync loaded" || fail "LaunchAgent com.asm.reindex-and-rsync not loaded (re-run install.sh)"

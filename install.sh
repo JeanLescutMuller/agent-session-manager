@@ -157,8 +157,8 @@ fi
 # -- Scheduled reindex + sync ---------------------------------------------------
 
 # Run through multi-host-orchestrator (separate project, ~/opt/multi-host-orchestrator): this machine's own
-# scheduler starts its mho_entrypoint.sh on mho_var.sh every 10 min; mho_var.sh says when the job really
-# runs (at most every 30 min, online only). Real plist / unit files here, symlinks where the OS looks.
+# scheduler starts its mho_entrypoint.sh on mho_var.sh every 30 min (the whole schedule; mho_var.sh adds a
+# timeout). Real plist / unit files here, symlinks where the OS looks.
 cp "$SRC_DIR/mho_var.sh" "$SERVICE_DIR/mho_var.sh"
 echo "  $SERVICE_DIR/mho_var.sh"
 # Self-migrating: the job files of the Python multi-host-orchestrator (until 2026-10-09) and of smart-orchestrator
@@ -192,21 +192,21 @@ if $IS_MACOS; then
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>$MHO</string><string>$SERVICE_DIR/mho_var.sh</string></array>
-  <key>StartInterval</key><integer>600</integer><key>RunAtLoad</key><true/><key>AbandonProcessGroup</key><true/>
+  <key>StartInterval</key><integer>1800</integer><key>RunAtLoad</key><true/><key>AbandonProcessGroup</key><true/>
 </dict></plist>
 PLIST
     ln -sfn "$SERVICE_DIR/$LABEL.plist" "$HOME/Library/LaunchAgents/$LABEL.plist"
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist" && echo "  LaunchAgent $LABEL (every 10 min)"
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist" && echo "  LaunchAgent $LABEL (every 30 min)"
 elif command -v systemctl &>/dev/null; then
     UNIT=asm-reindex-and-rsync
     printf '[Unit]\nDescription=asm: reindex + rsync (through multi-host-orchestrator)\n[Service]\nType=oneshot\nExecStart=/bin/bash %s %s\nKillMode=process\nTimeoutStartSec=infinity\n' \
         "$MHO" "$SERVICE_DIR/mho_var.sh" > "$SERVICE_DIR/$UNIT.service"
-    printf '[Unit]\nDescription=asm: reindex + rsync every 10 min\n[Timer]\nOnActiveSec=1min\nOnUnitActiveSec=10min\nPersistent=true\n[Install]\nWantedBy=timers.target\n' > "$SERVICE_DIR/$UNIT.timer"
+    printf '[Unit]\nDescription=asm: reindex + rsync every 30 min\n[Timer]\nOnCalendar=*:0/30\nPersistent=true\n[Install]\nWantedBy=timers.target\n' > "$SERVICE_DIR/$UNIT.timer"
     mkdir -p "$HOME/.config/systemd/user"
     ln -sfn "$SERVICE_DIR/$UNIT.service" "$HOME/.config/systemd/user/$UNIT.service"
     ln -sfn "$SERVICE_DIR/$UNIT.timer" "$HOME/.config/systemd/user/$UNIT.timer"
-    systemctl --user daemon-reload && systemctl --user enable --now "$UNIT.timer" 2>/dev/null && echo "  systemd timer $UNIT (every 10 min)"
+    systemctl --user daemon-reload && systemctl --user enable --now "$UNIT.timer" 2>/dev/null && echo "  systemd timer $UNIT (every 30 min)"
     loginctl enable-linger "$USER" 2>/dev/null || true
 fi
 [ -x "$MHO" ] || echo "  NOTE: multi-host-orchestrator is not installed ($MHO missing): the trigger runs nothing until it is (github.com/JeanLescutMuller/multi-host-orchestrator)."
