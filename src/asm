@@ -95,6 +95,7 @@ CODEX_ENABLED = (_codex_enabled_setting if isinstance(_codex_enabled_setting, bo
 
 RESET = "\033[0m"
 C_DIR = "\033[38;5;240m"
+C_UUID = "\033[38;5;240m"      # grey - short session id, trailing column
 
 # The host color carries exactly one bit: is this session on THIS machine
 # (blue - genuinely resumable) or on another one (dark red - at best
@@ -851,6 +852,7 @@ def format_session_for_fzf(doc: Dict[str, Any], idx_path: str,
     columns = [status_block(doc), title_str, agent_block(doc), host_block(doc)]
     if working_dir:
         columns.append(f"{C_DIR}{working_dir}{RESET}")
+    columns.append(f"{C_UUID}{uuid[:8]}{RESET}")
     display = "  ".join(c for c in columns if c)
 
     snippet = extract_snippet(doc.get("conversation", []), keywords)
