@@ -15,9 +15,9 @@ not_before: 2026-10-11[Europe/Zurich]
 planned_at: 2026-10-11[Europe/Zurich]
 not_after:
 # ── Status and claim
-status: todo
-claimed_since:
-claimed_by:
+status: in-progress
+claimed_since: 2026-10-10T20:46+02:00[Europe/Zurich]
+claimed_by: chan-lescut-macbook-pro, claude, e64c2382-32f1-4948-9b43-9133bf9b2192
 # ── Links
 depends_on: []
 todoist_id: 6hjCx2q8F3R264GV

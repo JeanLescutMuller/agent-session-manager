@@ -25,7 +25,6 @@ import argparse
 import subprocess
 import shlex
 import signal
-import socket
 import tempfile
 import threading
 import time
@@ -133,7 +132,20 @@ def short_host(host: Optional[str]) -> Optional[str]:
     return host.split(".")[0] if host else None
 
 
-LOCAL_HOSTNAME = short_host(socket.gethostname()) or ""
+def machine_name() -> str:
+    """This machine's name: "Machine name" in ~/AGENTS.md (copy it identically)."""
+    name = (os.environ.get("JR_MACHINE_NAME") or (
+        subprocess.run(["scutil", "--get", "HostName"], capture_output=True, text=True).stdout
+        if sys.platform == "darwin" else Path("/etc/hostname").read_text())).strip().split(".")[0]
+    if not re.fullmatch(r"[A-Za-z0-9-]+", name):
+        raise RuntimeError("no machine name: macOS sudo scutil --set HostName <name>; Linux sudo hostnamectl set-hostname <name>")
+    return name
+
+
+try:
+    LOCAL_HOSTNAME = machine_name()
+except (OSError, RuntimeError):   # no name: no session counts as this machine's
+    LOCAL_HOSTNAME = ""
 
 # -- Title source -------------------------------------------------------------
 # custom = set via /rename, ai = Claude Code's native ai-title, empty/untitled
