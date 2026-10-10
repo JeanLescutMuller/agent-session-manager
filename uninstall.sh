@@ -19,7 +19,7 @@ echo ""
 
 # -- Remove scheduled reindex + rsync job -------------------------------------
 
-# Its trigger (run through multi-host-orchestrator), and any former scheduling left by older installs.
+# Its trigger (runs entrypoint.sh, for job-runner), and any former scheduling left by older installs.
 rm -f "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf"
 for name in com.jeanlescut.agent-session-manager com.asm.reindex-and-rsync asm-reindex-and-rsync com.asm.reindex-sync com.csm.reindex-sync; do
     if $IS_MACOS; then

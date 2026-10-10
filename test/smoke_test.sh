@@ -91,7 +91,7 @@ for f in asm asm-sync status; do
     fi
 done
 
-for f in lifecycle_generation.sh asm-reindex-and-rsync.sh mho_var.sh install.sh uninstall.sh; do
+for f in lifecycle_generation.sh asm-reindex-and-rsync.sh entrypoint.sh install.sh uninstall.sh; do
     [[ -f "$DEPLOY_DIR/$f" ]] && pass "$DEPLOY_DIR/$f present" || fail "$DEPLOY_DIR/$f missing"
 done
 
@@ -109,7 +109,7 @@ if [[ -d "$REPO_DIR/src" ]]; then
             diff -q "$REPO_DIR/src/$f" "$BIN_DIR/$f" &>/dev/null || drift=1
         fi
     done
-    for f in lifecycle_generation.sh asm-reindex-and-rsync.sh mho_var.sh install.sh uninstall.sh; do
+    for f in lifecycle_generation.sh asm-reindex-and-rsync.sh entrypoint.sh install.sh uninstall.sh; do
         if [[ -f "$REPO_DIR/src/$f" && -f "$DEPLOY_DIR/$f" ]]; then
             diff -q "$REPO_DIR/src/$f" "$DEPLOY_DIR/$f" &>/dev/null || drift=1
         elif [[ -f "$REPO_DIR/$f" && -f "$DEPLOY_DIR/$f" ]]; then
@@ -144,7 +144,7 @@ else
     fail "~/.claude/settings.json not found"
 fi
 
-# Scheduler: this machine's trigger runs multi-host-orchestrator (separate project) on mho_var.sh every 30 min
+# Scheduler: this machine's trigger runs entrypoint.sh (for job-runner, separate project) every 30 min
 if [[ "$(uname -s)" == "Darwin" ]]; then
     launchctl list com.jeanlescut.agent-session-manager >/dev/null 2>&1 \
         && pass "LaunchAgent com.jeanlescut.agent-session-manager loaded" || fail "LaunchAgent com.jeanlescut.agent-session-manager not loaded (re-run install.sh)"
@@ -152,8 +152,9 @@ else
     systemctl --user is-active --quiet com.jeanlescut.agent-session-manager.timer \
         && pass "systemd timer com.jeanlescut.agent-session-manager active" || fail "systemd timer com.jeanlescut.agent-session-manager not active (re-run install.sh)"
 fi
-[[ -x "$HOME/opt/multi-host-orchestrator/mho_entrypoint.sh" ]] \
-    && pass "multi-host-orchestrator installed" || fail "multi-host-orchestrator missing: ~/opt/multi-host-orchestrator/mho_entrypoint.sh"
+[[ -f "$HOME/opt/job-runner/lib.sh" ]] \
+    && pass "job-runner installed" || fail "job-runner missing: ~/opt/job-runner/lib.sh"
+[[ ! -e "$DEPLOY_DIR/mho_var.sh" ]] || fail "the former multi-host-orchestrator job file mho_var.sh is still there (re-run install.sh)"
 [[ ! -e "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" ]] \
     || fail "the former job link jobs/asm-reindex-and-rsync.conf is still there (re-run install.sh)"
 for name in com.asm.reindex-sync com.csm.reindex-sync com.asm.reindex-and-rsync asm-reindex-and-rsync; do

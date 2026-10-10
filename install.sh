@@ -156,13 +156,14 @@ fi
 
 # -- Scheduled reindex + sync ---------------------------------------------------
 
-# Run through multi-host-orchestrator (separate project, ~/opt/multi-host-orchestrator): this machine's own
-# scheduler starts its mho_entrypoint.sh on mho_var.sh every 30 min (the whole schedule; mho_var.sh adds a
-# timeout). Real plist / unit files here, symlinks where the OS looks.
-cp "$SRC_DIR/mho_var.sh" "$SERVICE_DIR/mho_var.sh"
-echo "  $SERVICE_DIR/mho_var.sh"
-# Self-migrating: the job files of the Python multi-host-orchestrator (until 2026-10-09) and of smart-orchestrator
-rm -f "$SERVICE_DIR/multi-host-orchestrator.conf" "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" \
+# Its entrypoint for job-runner (separate project, ~/opt/job-runner): this machine's own scheduler runs
+# entrypoint.sh every 30 min (the whole schedule; the entrypoint adds a timeout and records each check).
+# Real plist / unit files here, symlinks where the OS looks.
+cp "$SRC_DIR/entrypoint.sh" "$SERVICE_DIR/entrypoint.sh"
+echo "  $SERVICE_DIR/entrypoint.sh"
+# Self-migrating: the job files of multi-host-orchestrator (mho_var.sh, until 2026-10-10), of its Python version
+# (until 2026-10-09) and of smart-orchestrator
+rm -f "$SERVICE_DIR/mho_var.sh" "$SERVICE_DIR/multi-host-orchestrator.conf" "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" \
       "$SERVICE_DIR/smart-orchestrator.conf" "$HOME/opt/smart-orchestrator/jobs/asm-reindex-and-rsync.conf"
 
 # Self-migrating: remove the former launchd / systemd scheduling of this job
@@ -184,7 +185,6 @@ for name in com.asm.reindex-sync com.csm.reindex-sync com.asm.reindex-and-rsync 
     fi
 done
 
-MHO="$HOME/opt/multi-host-orchestrator/mho_entrypoint.sh"
 LABEL=com.jeanlescut.agent-session-manager   # the trigger's name: com.jeanlescut.<repo>, the same on macOS and Linux
 if $IS_MACOS; then
     cat > "$SERVICE_DIR/$LABEL.plist" <<PLIST
@@ -192,7 +192,7 @@ if $IS_MACOS; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$MHO</string><string>$SERVICE_DIR/mho_var.sh</string></array>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$SERVICE_DIR/entrypoint.sh</string></array>
   <key>StartInterval</key><integer>1800</integer><key>RunAtLoad</key><true/><key>AbandonProcessGroup</key><true/>
 </dict></plist>
 PLIST
@@ -200,8 +200,8 @@ PLIST
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist" && echo "  LaunchAgent $LABEL (every 30 min)"
 elif command -v systemctl &>/dev/null; then
-    printf '[Unit]\nDescription=asm: reindex + rsync (through multi-host-orchestrator)\n[Service]\nType=oneshot\nExecStart=/bin/bash %s %s\nKillMode=process\nTimeoutStartSec=infinity\n' \
-        "$MHO" "$SERVICE_DIR/mho_var.sh" > "$SERVICE_DIR/$LABEL.service"
+    printf '[Unit]\nDescription=asm: reindex + rsync (its job-runner entrypoint)\n[Service]\nType=oneshot\nExecStart=/bin/bash %s\nKillMode=process\nTimeoutStartSec=infinity\n' \
+        "$SERVICE_DIR/entrypoint.sh" > "$SERVICE_DIR/$LABEL.service"
     printf '[Unit]\nDescription=asm: reindex + rsync every 30 min\n[Timer]\nOnCalendar=*:0/30\nPersistent=true\n[Install]\nWantedBy=timers.target\n' > "$SERVICE_DIR/$LABEL.timer"
     mkdir -p "$HOME/.config/systemd/user"
     ln -sfn "$SERVICE_DIR/$LABEL.service" "$HOME/.config/systemd/user/$LABEL.service"
@@ -209,7 +209,7 @@ elif command -v systemctl &>/dev/null; then
     systemctl --user daemon-reload && systemctl --user enable --now "$LABEL.timer" 2>/dev/null && echo "  systemd timer $LABEL (every 30 min)"
     loginctl enable-linger "$USER" 2>/dev/null || true
 fi
-[ -x "$MHO" ] || echo "  NOTE: multi-host-orchestrator is not installed ($MHO missing): the trigger runs nothing until it is (github.com/JeanLescutMuller/multi-host-orchestrator)."
+[ -f "$HOME/opt/job-runner/lib.sh" ] || echo "  NOTE: job-runner is not installed (~/opt/job-runner/lib.sh missing): every check fails until it is (github.com/JeanLescutMuller/job-runner)."
 
 # -- Register lifecycle hooks in settings.json --------------------------------
 

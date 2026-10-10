@@ -275,7 +275,7 @@ Optionally: confirm by checking whether the PID recorded in the `start` event is
 | `lifecycle_generation.sh` | shell script | Claude Code hooks (SessionStart / SessionEnd), and the Codex plugin below - same script, same trigger events |
 | `codex-plugin/` | Codex plugin | registered via `codex plugin`; wires Codex's SessionStart/SessionEnd to `lifecycle_generation.sh` |
 | `asm-sync` | shell script | trigger 1: backgrounded on `SessionEnd`; trigger 2: opportunistically at the start of `asm resume`; trigger 3: scheduled, as part of `asm-reindex-and-rsync.sh`; always a no-op if no remote configured |
-| `asm-reindex-and-rsync.sh` | shell script | scheduled through multi-host-orchestrator (`mho_var.sh`) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
+| `asm-reindex-and-rsync.sh` | shell script | scheduled through job-runner (`entrypoint.sh`) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
 | `asm` | shell script | terminal, before opening the agent (`asm resume`, `asm reindex`, …) |
 | `~/.claude/skills/inject/SKILL.md`, `~/.codex/skills/inject/SKILL.md` | skill | inside an active Claude Code or Codex session |
 
@@ -314,7 +314,7 @@ Reconciles **only** `~/opt/agent-session-manager/data/indexes/*.json` between th
 **Three triggers, kept independent on purpose** (separate failure modes, easy to tell apart in logs):
 1. `SessionEnd` hook - reindex the session that just ended, push its one index entry. Backgrounded, non-blocking.
 2. Start of `asm resume` - rate-limited (skipped if attempted <60s ago) opportunistic pull, hard-capped at a few seconds via a subprocess timeout, wrapped so it can never crash or hang the interactive command.
-3. `asm-reindex-and-rsync.sh`, scheduled by multi-host-orchestrator (every ~30 min) - `asm reindex` then unconditionally `asm-sync` (both directions). Reindex failing must never skip the sync step, so this wrapper explicitly ignores reindex's exit status rather than chaining under `set -e`.
+3. `asm-reindex-and-rsync.sh`, scheduled by its job-runner entrypoint (every ~30 min) - `asm reindex` then unconditionally `asm-sync` (both directions). Reindex failing must never skip the sync step, so this wrapper explicitly ignores reindex's exit status rather than chaining under `set -e`.
 
 ### R6.5: `asm resume`
 
@@ -362,7 +362,7 @@ Skill for context injection when true resume is not possible, identical content 
 
 | Device | Files | Purpose |
 |---|---|---|
-| macOS | `~/Library/LaunchAgents/com.jeanlescut.agent-session-manager.plist` (symlink to `~/opt/agent-session-manager/`) | starts `~/opt/multi-host-orchestrator/mho_entrypoint.sh mho_var.sh` every 30 min (the whole schedule); mho runs `asm-reindex-and-rsync.sh` with a 20-min timeout and records it for the dashboard |
+| macOS | `~/Library/LaunchAgents/com.jeanlescut.agent-session-manager.plist` (symlink to `~/opt/agent-session-manager/`) | starts `~/opt/agent-session-manager/entrypoint.sh` every 30 min (the whole schedule); it runs `asm-reindex-and-rsync.sh` through job-runner with a 20-min timeout and records it for the dashboard |
 | Linux | `~/.config/systemd/user/com.jeanlescut.agent-session-manager.{service,timer}` (symlinks to `~/opt/agent-session-manager/`) | the same, every 30 min |
 
 The Linux unit files use systemd's native `%h` home-directory specifier, so unlike the macOS `.plist` they need no `sed` templating at install time. `install.sh` also best-effort runs `loginctl enable-linger` on Linux - without it, the user's systemd instance (and thus the timer) may only run while a session/SSH login is active, which matters for a VM you don't keep permanently logged into.
