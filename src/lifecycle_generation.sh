@@ -49,11 +49,9 @@ else
 fi
 
 # --- Collect context ---
-# Short hostname only: `hostname` returns whatever DNS domain the current
-# network appends ("mac.home"), which would make the same machine look like
-# two hosts in the index. asm compares and colors hosts on this short form.
-HOSTNAME_VAL=$(hostname -s 2>/dev/null || hostname)
-HOSTNAME_VAL="${HOSTNAME_VAL%%.*}"
+# This machine's name: "Machine name" in ~/AGENTS.md (copy it identically); a hook never fails: "?"
+HOSTNAME_VAL=${JR_MACHINE_NAME:-$(if [ "$(uname)" = Darwin ]; then scutil --get HostName; else cat /etc/hostname; fi 2>/dev/null)} || :
+HOSTNAME_VAL=${HOSTNAME_VAL%%.*}; [[ $HOSTNAME_VAL =~ ^[A-Za-z0-9-]+$ ]] || HOSTNAME_VAL='?'
 WORKING_DIR="${CWD:-$PWD}"
 
 TMUX_SESSION=""

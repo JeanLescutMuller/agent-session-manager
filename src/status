@@ -9,8 +9,21 @@ import glob
 import json
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
+
+
+def machine_name() -> str:
+    """This machine's name: "Machine name" in ~/AGENTS.md (copy it identically)."""
+    name = (os.environ.get("JR_MACHINE_NAME") or (
+        subprocess.run(["scutil", "--get", "HostName"], capture_output=True, text=True).stdout
+        if sys.platform == "darwin" else Path("/etc/hostname").read_text())).strip().split(".")[0]
+    if not re.fullmatch(r"[A-Za-z0-9-]+", name):
+        raise RuntimeError("no machine name: macOS sudo scutil --set HostName <name>; Linux sudo hostnamectl set-hostname <name>")
+    return name
 
 # -- Pricing table (USD per million tokens) ----------------------------------
 # Matched by model-id prefix, longest first, so 'claude-opus-4-6-20260401'
@@ -159,7 +172,11 @@ def main() -> None:
 
     print(f"Title:              {s.title or '(not set)'}")
     print(f"UUID:               {sid}")
-    print(f"Hostname:           {os.uname().nodename}")
+    try:
+        host = machine_name()
+    except (OSError, RuntimeError):
+        host = "?"
+    print(f"Hostname:           {host}")
     print(f"Current WD:         {os.getcwd()}")
     print(f"JSONL file:         {jsonl_path or '(not found)'}")
     print(f"Index file:         {idx_path if os.path.exists(idx_path) else '(not found)'}")
