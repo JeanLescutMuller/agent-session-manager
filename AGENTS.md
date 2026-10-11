@@ -22,7 +22,7 @@ agent-session-manager/
 │   ├-- entrypoint.sh         # the job for job-runner (separate project): what it runs, its timeout, its summary
 │   ├-- settings.json        # settings template (deploys to ~/opt/agent-session-manager/data/settings.json)
 │   ├-- status               # standalone session info script
-│   ├-- inject/              # /inject skill - Claude Code and Codex
+│   ├-- inject-session/              # /inject-session skill - Claude Code and Codex
 │   │   └-- SKILL.md
 │   ├-- lifecycle_generation.sh  # session lifecycle hook (cross-platform, both agents)
 │   ├-- codex-plugin/        # Codex plugin: registers the same lifecycle hooks
@@ -54,7 +54,7 @@ agent-session-manager/
 | `--agent`/`--host`/`--tmux`/`--print-cmd` filters | ✅ | ✅ |
 | Cross-machine sync (index-only) | ✅ | ✅ (same index, backend-agnostic) |
 | Lifecycle hooks (`SessionStart`/`SessionEnd`) | ✅ native hook | ✅ plugin (`codex plugin`), needs a one-time hook-trust approval |
-| `/inject` skill | ✅ | ✅ |
+| `/inject-session` skill | ✅ | ✅ |
 | `asm close` (terminate a live session) | ✅ | ❌ - no stable public live-session surface in Codex CLI today; `asm close --uuid <codex-uuid>` fails with an explicit message rather than a misleading generic one. Not reachable from the interactive picker at all, since `live_only` filtering keys off Claude's `~/.claude/sessions/*.json` exclusively. |
 
 ## Install / Update / Uninstall
@@ -82,7 +82,7 @@ pick up a settings.json that already exists.
 | Index | `~/opt/agent-session-manager/data/indexes/` | All |
 | Lifecycle sidecars | `~/opt/agent-session-manager/data/lifecycles/` | All |
 | Sync log | `~/opt/agent-session-manager/data/sync-log.jsonl` | All |
-| `inject/SKILL.md` | `~/.claude/skills/inject/SKILL.md` and, if Codex is detected, `~/.codex/skills/inject/SKILL.md` | All |
+| `inject-session/SKILL.md` | `~/.claude/skills/inject-session/SKILL.md` and, if Codex is detected, `~/.codex/skills/inject-session/SKILL.md` | All |
 | `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `entrypoint.sh`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
 | Lifecycle hooks (Claude) | `~/.claude/settings.json` (auto-registered) | All |
 | Lifecycle hooks (Codex, if detected) | `codex-plugin/` deployed to `~/opt/agent-session-manager/codex-plugin/`, registered as `asm@asm-local` in `~/.codex/config.toml` via `codex plugin marketplace add` / `codex plugin add` | All |

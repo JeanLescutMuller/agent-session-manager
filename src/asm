@@ -1451,14 +1451,14 @@ def cmd_resume(opts: SearchOpts, fork: bool = False, print_cmd: bool = False) ->
         # The .jsonl itself is gone - either deleted locally, or this doc came
         # from a machine that has never synced .jsonl files (asm-sync only ever
         # moves the index, never the transcript), so a real resume is not
-        # possible either way. /inject reads the indexed conversation straight
+        # possible either way. /inject-session reads the indexed conversation straight
         # into a new session instead.
         print("\n\033[38;5;208mSession not found locally.\033[0m")
         print(f"  UUID:  {uuid}")
         print(f"  Title: {doc.get('custom_title', '')}")
         print(f"  Slug:  {doc.get('slug', '')}")
         print(f"\n  True resume is not possible: the .jsonl transcript isn't on this machine.")
-        print(f"  Open Claude and run: /inject {uuid}")
+        print(f"  Open Claude and run: /inject-session {uuid}")
         sys.exit(0)
 
     backend = BACKENDS.get(doc.get("agent_type") or "claude", BACKENDS["claude"])
@@ -1496,7 +1496,7 @@ def cmd_resume(opts: SearchOpts, fork: bool = False, print_cmd: bool = False) ->
         print(f"  Original dir: {initial_wd}")
         print("")
         print("True resume is not possible from here.")
-        print(f"Open Claude and run: /inject {uuid}")
+        print(f"Open Claude and run: /inject-session {uuid}")
         print("")
         return
 

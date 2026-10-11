@@ -1,5 +1,5 @@
 ---
-name: inject
+name: inject-session
 description: Inject the content of a past session (Claude Code or Codex) into the current conversation. Use when asm resume determined true resume is not possible, or when the user asks to inject a past session by UUID or keywords.
 allowed-tools: Read, Bash(cat *)
 ---

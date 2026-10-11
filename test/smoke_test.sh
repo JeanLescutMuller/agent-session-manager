@@ -95,9 +95,9 @@ for f in lifecycle_generation.sh asm-reindex-and-rsync.sh entrypoint.sh install.
     [[ -f "$DEPLOY_DIR/$f" ]] && pass "$DEPLOY_DIR/$f present" || fail "$DEPLOY_DIR/$f missing"
 done
 
-[[ -f "$HOME/.claude/skills/inject/SKILL.md" ]] \
-    && pass "/inject skill installed" \
-    || fail "~/.claude/skills/inject/SKILL.md missing"
+[[ -f "$HOME/.claude/skills/inject-session/SKILL.md" ]] \
+    && pass "/inject-session skill installed" \
+    || fail "~/.claude/skills/inject-session/SKILL.md missing"
 
 # Drift check: if we're running from a git checkout, compare deployed copies
 # against src/ to catch "edited src/ but forgot to re-run install.sh".
@@ -704,13 +704,13 @@ else
         pass "uninstall removes the marketplace + plugin entries cleanly"
     fi
 
-    # /inject skill: install.sh must additionally copy SKILL.md into
+    # /inject-session skill: install.sh must additionally copy SKILL.md into
     # ~/.codex/skills/ (a separate directory from Claude's, so no collision)
     # whenever $CODEX_PRESENT.
-    inject_block=$(sed -n '/^# -- inject skill/,/^fi$/p' "$REPO_ROOT/install.sh")
+    inject_block=$(sed -n '/^# -- inject-session skill/,/^fi$/p' "$REPO_ROOT/install.sh")
     run_in_scratch "$inject_block" >/dev/null 2>&1
-    if [[ -f "$LIVE_SCRATCH/.codex/skills/inject/SKILL.md" ]] && \
-       [[ -f "$LIVE_SCRATCH/.claude/skills/inject/SKILL.md" ]]; then
+    if [[ -f "$LIVE_SCRATCH/.codex/skills/inject-session/SKILL.md" ]] && \
+       [[ -f "$LIVE_SCRATCH/.claude/skills/inject-session/SKILL.md" ]]; then
         pass "inject skill installed under both ~/.claude/skills/ and ~/.codex/skills/"
     else
         fail "inject skill missing from ~/.claude/skills/ and/or ~/.codex/skills/"

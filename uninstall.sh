@@ -50,16 +50,16 @@ for bin in asm asm-sync status; do
     fi
 done
 
-# -- Remove inject skill -------------------------------------------------------
+# -- Remove inject-session skill -------------------------------------------------------
 
-if [ -d "$HOME/.claude/skills/inject" ]; then
-    rm -rf "$HOME/.claude/skills/inject"
-    echo "  Removed ~/.claude/skills/inject/"
+if [ -d "$HOME/.claude/skills/inject-session" ]; then
+    rm -rf "$HOME/.claude/skills/inject-session"
+    echo "  Removed ~/.claude/skills/inject-session/"
 fi
 
-if [ -d "$HOME/.codex/skills/inject" ]; then
-    rm -rf "$HOME/.codex/skills/inject"
-    echo "  Removed ~/.codex/skills/inject/"
+if [ -d "$HOME/.codex/skills/inject-session" ]; then
+    rm -rf "$HOME/.codex/skills/inject-session"
+    echo "  Removed ~/.codex/skills/inject-session/"
 fi
 
 # -- Remove info skill ---------------------------------------------------------

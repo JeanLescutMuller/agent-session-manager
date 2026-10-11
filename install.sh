@@ -4,7 +4,7 @@
 # Installs ASM from this source checkout to system locations:
 #   ~/opt/agent-session-manager/bin/     - canonical deployment: asm, asm-sync, status
 #   ~/.local/bin/                         - PATH entry points, symlinked into the above
-#   ~/.claude/skills/inject/SKILL.md      - /inject skill
+#   ~/.claude/skills/inject-session/SKILL.md      - /inject-session skill
 #   ~/opt/agent-session-manager/         - service scripts + logs (canonical location)
 #   ~/opt/agent-session-manager/data/     - settings, index, lifecycle sidecars, sync log
 #   ~/Library/LaunchAgents/ (macOS) or
@@ -135,17 +135,23 @@ print('true' if m.CODEX_ENABLED else 'false')
 CODEX_PRESENT=false
 [ "$CODEX_ENABLED" = "true" ] && command -v codex &>/dev/null && CODEX_PRESENT=true
 
-# -- inject skill -> ~/.claude/skills/inject/ (+ ~/.codex/skills/ if Codex) ---
+# -- inject-session skill -> ~/.claude/skills/inject-session/ (+ ~/.codex/skills/ if Codex) ---
 
-mkdir -p "$HOME/.claude/skills/inject"
-cp "$SRC_DIR/inject/SKILL.md" "$HOME/.claude/skills/inject/SKILL.md"
-echo "  $HOME/.claude/skills/inject/SKILL.md"
+mkdir -p "$HOME/.claude/skills/inject-session"
+cp "$SRC_DIR/inject-session/SKILL.md" "$HOME/.claude/skills/inject-session/SKILL.md"
+echo "  $HOME/.claude/skills/inject-session/SKILL.md"
 
 if $CODEX_PRESENT; then
-    mkdir -p "$HOME/.codex/skills/inject"
-    cp "$SRC_DIR/inject/SKILL.md" "$HOME/.codex/skills/inject/SKILL.md"
-    echo "  $HOME/.codex/skills/inject/SKILL.md"
+    mkdir -p "$HOME/.codex/skills/inject-session"
+    cp "$SRC_DIR/inject-session/SKILL.md" "$HOME/.codex/skills/inject-session/SKILL.md"
+    echo "  $HOME/.codex/skills/inject-session/SKILL.md"
 fi
+
+# -- Clean up the old /inject skill (renamed inject-session, 2026-10-11) -----
+
+for old in "$HOME/.claude/skills/inject" "$HOME/.codex/skills/inject"; do
+    [ -f "$old/SKILL.md" ] && rm "$old/SKILL.md" && rmdir "$old" 2>/dev/null && echo "  removed old $old"
+done
 
 # -- Clean up old /info skill (replaced by ~/.local/bin/status) --------------
 
