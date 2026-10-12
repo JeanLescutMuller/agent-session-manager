@@ -219,6 +219,13 @@ fi
 # Real plist / unit files here, symlinks where the OS looks.
 cp "$SRC_DIR/entrypoint.sh" "$SERVICE_DIR/entrypoint.sh"
 echo "  $SERVICE_DIR/entrypoint.sh"
+# Its dashboard settings, beside it; job-runner's put-conf.sh gives them to the dashboard on the VM (job-runner DESIGN §11)
+cp "$SRC_DIR/entrypoint.conf" "$SERVICE_DIR/entrypoint.conf"
+if [ -f "$HOME/opt/job-runner/put-conf.sh" ]; then
+    bash "$HOME/opt/job-runner/put-conf.sh" agent-session-manager "$SERVICE_DIR/entrypoint.conf" | sed 's/^/  /' || echo "  WARN: dashboard settings not sent"
+else
+    echo "  WARN: job-runner not installed (~/opt/job-runner/put-conf.sh missing): dashboard settings not sent"
+fi
 # Self-migrating: the job files of multi-host-orchestrator (mho_var.sh, until 2026-10-10), of its Python version
 # (until 2026-10-09) and of smart-orchestrator
 rm -f "$SERVICE_DIR/mho_var.sh" "$SERVICE_DIR/multi-host-orchestrator.conf" "$HOME/opt/multi-host-orchestrator/jobs/asm-reindex-and-rsync.conf" \
