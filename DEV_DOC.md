@@ -167,6 +167,7 @@ Extracts and stores cleaned session content into a searchable JSON index.
 - `last_active`: timestamp of the last message
 - `tmux_session`, `tmux_pane`, `tmux_window`: populated from lifecycle events
 - `session_state`: `pending` (has a `start`/`resume` lifecycle event with no matching `end`) or `exited`
+- `interactive`: `false` for a session no human typed in - Claude `entrypoint` `sdk-cli` (`claude -p`) or `sdk-py`/`sdk-ts` (Agent SDK), Codex `session_meta.source` `exec` or a sub-agent (`{"subagent": ...}`). Still indexed, so `--uuid` finds it, but never shown by the picker. Kept in the doc rather than deleting the file, because `asm-sync` never deletes: a deleted file would come back from the other machine
 - `conversation`: list of `{role, timestamp, text}` entries - user and assistant turns only; system reminders, XML tags, and tool invocations stripped; tool output text retained
 
 **Incremental updates:** For each `<uuid>.jsonl`, check whether a corresponding `<uuid>.json` exists in the index and has a newer mtime. If yes, skip. If no, re-index. This avoids redundant work on every machine independently; if a remote is configured, `asm-sync` (R6.4) separately reconciles already-built index files between machines rather than re-indexing them.

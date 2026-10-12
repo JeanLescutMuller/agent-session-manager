@@ -33,7 +33,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-VERSION = "v4.6"
+VERSION = "v4.7"
 HOME = os.path.expanduser("~")
 ASM_DATA_DIR = os.path.join(HOME, "opt", "agent-session-manager", "data")
 
@@ -313,6 +313,9 @@ class Transcript(NamedTuple):
     created_at: Optional[str]
     last_active: Optional[str]
     messages: List[Dict[str, Any]]
+    # False for a session no human typed in: `claude -p` / Agent SDK runs,
+    # Codex sub-agents and `codex exec`. Kept in the index, hidden in the picker.
+    interactive: bool = True
 
     @property
     def title(self) -> Optional[str]:
@@ -323,11 +326,15 @@ class Transcript(NamedTuple):
 def read_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
     """Parse a session .jsonl into a Transcript (single pass over the file)."""
     session_id = custom_title = ai_title = permission_mode = None
-    cwd = created_at = last_active = None
+    cwd = created_at = last_active = entrypoint = None
     messages: List[Dict[str, Any]] = []
 
     for entry in iter_entries(jsonl_path, warn=warn):
         etype = entry.get("type", "")
+        # "cli" = an interactive session; "sdk-cli" = `claude -p`, "sdk-py" /
+        # "sdk-ts" = the Agent SDK. Older transcripts have no entrypoint at all.
+        if not entrypoint:
+            entrypoint = entry.get("entrypoint")
 
         if etype == "custom-title":
             custom_title = entry.get("customTitle") or custom_title
@@ -368,6 +375,7 @@ def read_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
         created_at=created_at,
         last_active=last_active,
         messages=messages,
+        interactive=not (entrypoint or "").startswith("sdk-"),
     )
 
 
@@ -404,6 +412,7 @@ def _codex_session_titles() -> Dict[str, str]:
 def read_codex_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
     """Parse a Codex rollout .jsonl into a Transcript (single pass over the file)."""
     session_id = cwd = created_at = last_active = None
+    interactive = True
     messages: List[Dict[str, Any]] = []
 
     for entry in iter_entries(jsonl_path, warn=warn):
@@ -413,6 +422,10 @@ def read_codex_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
         if etype == "session_meta":
             session_id = payload.get("session_id") or payload.get("id") or session_id
             cwd = payload.get("cwd") or cwd
+            # source is "cli" / "vscode" for a human, "exec" for `codex exec`,
+            # and a dict ({"subagent": ...}) for a sub-agent such as guardian.
+            source = payload.get("source")
+            interactive = interactive and not (isinstance(source, dict) or source == "exec")
             continue
 
         if etype != "response_item" or payload.get("type") != "message":
@@ -448,6 +461,7 @@ def read_codex_transcript(jsonl_path: str, warn: bool = True) -> Transcript:
         created_at=created_at,
         last_active=last_active,
         messages=messages,
+        interactive=interactive,
     )
 
 
@@ -527,6 +541,7 @@ def build_doc(uuid: str, transcript: Transcript, lifecycle_events: List[Dict[str
         "created_at": transcript.created_at,
         "last_active": transcript.last_active,
         "session_state": determine_state(lifecycle_events),
+        "interactive": transcript.interactive,
         "tmux_session": tmux_session,
         "tmux_window": tmux_window,
         "tmux_pane": tmux_pane,
@@ -607,6 +622,12 @@ def searchable_text(doc: Dict[str, Any]) -> str:
 def passes_filters(doc: Dict[str, Any], opts: SearchOpts,
                    cutoff_from: Optional[datetime], cutoff_until: Optional[datetime]) -> bool:
     """Apply the --state / --host / --agent / --tmux / --from / --until filters to one session."""
+    # Sessions nobody typed in (`claude -p`, Agent SDK, Codex sub-agents) are
+    # never shown; `--uuid` still finds them. Docs indexed before v4.7 have no
+    # field and stay visible until the next reindex.
+    if doc.get("interactive") is False:
+        return False
+
     missing = doc.get("_source_missing", False)
     if opts.state:
         # 'deleted' is not a session_state in the index - it means the source

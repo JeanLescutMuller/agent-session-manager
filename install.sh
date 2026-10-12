@@ -124,6 +124,29 @@ else
     echo "  $SERVICE_DIR/data/settings.json (already exists, not overwritten)"
 fi
 
+# A settings.json from before the move to ~/opt/ still points its dirs at
+# ~/.asm/: asm then reads an index and lifecycle dir the hooks no longer write
+# to. Copy the old index files across (newer wins), then rewrite those values
+# to the template's. ~/.asm/ itself is left in place for the user to delete.
+if [ -d "$HOME/.asm/indexes" ]; then
+    mkdir -p "$SERVICE_DIR/data/indexes"
+    rsync -a --update "$HOME/.asm/indexes/" "$SERVICE_DIR/data/indexes/"
+fi
+python3 - "$SERVICE_DIR/data/settings.json" "$SRC_DIR/settings.json" <<'PY'
+import json, sys
+path, template_path = sys.argv[1], sys.argv[2]
+d_user, d_template = json.load(open(path)), json.load(open(template_path))
+l_fixed = [k for k, v in d_user.items()
+           if isinstance(v, str) and v.startswith("~/.asm/") and k in d_template]
+for k in l_fixed:
+    d_user[k] = d_template[k]
+if l_fixed:
+    with open(path, "w") as f:
+        json.dump(d_user, f, indent=2)
+        f.write("\n")
+    print(f"  {path}: {', '.join(l_fixed)} moved from ~/.asm/ to ~/opt/agent-session-manager/data/")
+PY
+
 # Settings are in place now, so this reflects any codex_enabled override the
 # user already had - reused below for both the inject skill and the plugin
 # registration, rather than re-detecting Codex twice.

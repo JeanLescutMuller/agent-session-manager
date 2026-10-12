@@ -140,6 +140,8 @@ them, since `.jsonl` transcripts are never synced between machines.
 
 The last column, in grey, is the first 8 characters of the session's UUID, followed by `...` (e.g. `3f2a91c0...`).
 
+Sessions nobody typed in are never listed: `claude -p` and Agent SDK runs, Codex sub-agents and `codex exec`. They stay in the index, so `asm resume --uuid <uuid>` still opens one.
+
 ### `asm reindex` - rebuild the local JSON index
 
 ```bash
