@@ -50,18 +50,23 @@ for bin in asm asm-sync status; do
     fi
 done
 
-# -- Remove the skill links (only those pointing into this clone) ------------
+# -- Remove the skill links and their read-only copies in ~/opt -------------
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for src in "$SCRIPT_DIR"/skills/*/; do
-    src="${src%/}"
-    for link in "$HOME/.claude/skills/$(basename "$src")" "$HOME/.agents/skills/$(basename "$src")"; do
-        if [ -L "$link" ] && [ "$(readlink "$link")" = "$src" ]; then
+OPT_SKILLS="$HOME/opt/agent-session-manager/skills"
+for dst in "$OPT_SKILLS"/*/; do
+    [ -d "$dst" ] || continue
+    dst="${dst%/}"; name=$(basename "$dst")
+    for link in "$HOME/.claude/skills/$name" "$HOME/.agents/skills/$name"; do
+        if [ -L "$link" ] && [ "$(readlink "$link")" = "$dst" ]; then
             rm "$link"
             echo "  Removed $link"
         fi
     done
 done
+if [ -d "$OPT_SKILLS" ]; then
+    chmod -R u+w "$OPT_SKILLS" && rm -r "$OPT_SKILLS"
+    echo "  Removed $OPT_SKILLS"
+fi
 
 # -- Remove info skill ---------------------------------------------------------
 

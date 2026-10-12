@@ -80,7 +80,7 @@ pick up a settings.json that already exists.
 | Index | `~/opt/agent-session-manager/data/indexes/` | All |
 | Lifecycle sidecars | `~/opt/agent-session-manager/data/lifecycles/` | All |
 | Sync log | `~/opt/agent-session-manager/data/sync-log.jsonl` | All |
-| `skills/inject-session/` (repo root, not `src/`) | symlinks `~/.claude/skills/inject-session` and `~/.agents/skills/inject-session` into this clone | All |
+| `skills/inject-session/` (repo root, not `src/`) | read-only copy `~/opt/agent-session-manager/skills/inject-session/`, linked from `~/.claude/skills/` and `~/.agents/skills/` | All |
 | `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `entrypoint.sh`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
 | Lifecycle hooks (Claude) | `~/.claude/settings.json` (auto-registered) | All |
 | Lifecycle hooks (Codex, if detected) | `codex-plugin/` deployed to `~/opt/agent-session-manager/codex-plugin/`, registered as `asm@asm-local` in `~/.codex/config.toml` via `codex plugin marketplace add` / `codex plugin add` | All |

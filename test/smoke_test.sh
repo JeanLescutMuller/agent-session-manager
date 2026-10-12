@@ -95,9 +95,9 @@ for f in lifecycle_generation.sh asm-reindex-and-rsync.sh entrypoint.sh install.
     [[ -f "$DEPLOY_DIR/$f" ]] && pass "$DEPLOY_DIR/$f present" || fail "$DEPLOY_DIR/$f missing"
 done
 
-[[ -L "$HOME/.claude/skills/inject-session" && -f "$HOME/.claude/skills/inject-session/SKILL.md" ]] \
+[[ "$(readlink "$HOME/.claude/skills/inject-session")" == "$DEPLOY_DIR/skills/inject-session" && ! -w "$HOME/.claude/skills/inject-session/SKILL.md" ]] \
     && pass "/inject-session skill linked" \
-    || fail "~/.claude/skills/inject-session is not a symlink to the skill"
+    || fail "~/.claude/skills/inject-session is not a link to the read-only copy in $DEPLOY_DIR/skills/"
 
 # Drift check: if we're running from a git checkout, compare deployed copies
 # against src/ to catch "edited src/ but forgot to re-run install.sh".
@@ -704,13 +704,15 @@ else
         pass "uninstall removes the marketplace + plugin entries cleanly"
     fi
 
-    # Skills: install.sh symlinks each skills/<name>/ into ~/.claude/skills/
-    # and ~/.agents/skills/ (Codex), never copies.
-    skills_block=$(sed -n '/^# -- Skills: each skills/,/^done$/p' "$REPO_ROOT/install.sh")
+    # Skills: install.sh copies each skills/<name>/ read-only to ~/opt and links
+    # it from ~/.claude/skills/ and ~/.agents/skills/ (Codex).
+    skills_block=$(sed -n '/^# -- Skills: each skills/,/^# -- Clean up the old Codex copy/p' "$REPO_ROOT/install.sh")
     run_in_scratch "SCRIPT_DIR='$REPO_ROOT'; $skills_block" >/dev/null 2>&1
-    if [[ "$(readlink "$LIVE_SCRATCH/.claude/skills/inject-session")" == "$REPO_ROOT/skills/inject-session" ]] && \
-       [[ "$(readlink "$LIVE_SCRATCH/.agents/skills/inject-session")" == "$REPO_ROOT/skills/inject-session" ]]; then
-        pass "inject skill linked from both ~/.claude/skills/ and ~/.agents/skills/"
+    want="$LIVE_SCRATCH/opt/agent-session-manager/skills/inject-session"
+    if [[ "$(readlink "$LIVE_SCRATCH/.claude/skills/inject-session")" == "$want" ]] && \
+       [[ "$(readlink "$LIVE_SCRATCH/.agents/skills/inject-session")" == "$want" ]] && \
+       [[ ! -w "$want/SKILL.md" ]]; then
+        pass "inject skill: read-only copy in ~/opt, linked from ~/.claude/skills/ and ~/.agents/skills/"
     else
         fail "inject skill link missing from ~/.claude/skills/ and/or ~/.agents/skills/"
     fi

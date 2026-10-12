@@ -4,7 +4,7 @@
 # Installs ASM from this source checkout to system locations:
 #   ~/opt/agent-session-manager/bin/     - canonical deployment: asm, asm-sync, status
 #   ~/.local/bin/                         - PATH entry points, symlinked into the above
-#   ~/.claude/skills/inject-session, ~/.agents/skills/inject-session - symlinks to skills/inject-session/
+#   ~/.claude/skills/inject-session, ~/.agents/skills/inject-session - symlinks to ~/opt/agent-session-manager/skills/inject-session/ (read-only copy)
 #   ~/opt/agent-session-manager/         - service scripts + logs (canonical location)
 #   ~/opt/agent-session-manager/data/     - settings, index, lifecycle sidecars, sync log
 #   ~/Library/LaunchAgents/ (macOS) or
@@ -158,24 +158,37 @@ print('true' if m.CODEX_ENABLED else 'false')
 CODEX_PRESENT=false
 [ "$CODEX_ENABLED" = "true" ] && command -v codex &>/dev/null && CODEX_PRESENT=true
 
-# -- Skills: each skills/<name>/ symlinked into ~/.claude/skills/ and ~/.agents/skills/, never copied ---
-# An old copy at the link path is replaced only if identical (ignoring *.bak); anything else is kept.
+# -- Skills: each skills/<name>/ copied read-only to ~/opt/agent-session-manager/skills/ ---
+# and linked from ~/.claude/skills/ and ~/.agents/skills/. Edit the source here, then re-run
+# install.sh. A real folder at the link path is replaced only if identical (ignoring *.bak).
 
+OPT_SKILLS="$HOME/opt/agent-session-manager/skills"
+mkdir -p "$OPT_SKILLS"
+for dst in "$OPT_SKILLS"/*/; do      # a skill gone from the repo: its link and copy go too
+    [ -d "$dst" ] || continue
+    dst="${dst%/}"; name=$(basename "$dst")
+    [ -d "$SCRIPT_DIR/skills/$name" ] && continue
+    for link in "$HOME/.claude/skills/$name" "$HOME/.agents/skills/$name"; do
+        [ -L "$link" ] && [ "$(readlink "$link")" = "$dst" ] && rm "$link"
+    done
+    chmod -R u+w "$dst" && rm -r "$dst" && echo "  removed old skill $name"
+done
 for src in "$SCRIPT_DIR"/skills/*/; do
-    src="${src%/}"
+    src="${src%/}"; name=$(basename "$src"); dst="$OPT_SKILLS/$name"
+    [ -d "$dst" ] && chmod -R u+w "$dst" && rm -r "$dst"
+    cp -R "$src" "$dst" && chmod -R a-w "$dst"
     for home in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
-        link="$home/$(basename "$src")"
+        link="$home/$name"
         if [ -d "$link" ] && [ ! -L "$link" ]; then
-            if diff -rq -x '*.bak' "$link" "$src" >/dev/null 2>&1; then
-                rm -r "$link"
-            else
+            if ! diff -rq -x '*.bak' "$link" "$src" >/dev/null 2>&1; then
                 echo "  WARN: $link is a real folder that differs from $src - kept, not linked"
                 continue
             fi
+            rm -r "$link"
         fi
         mkdir -p "$home"
-        ln -sfn "$src" "$link"
-        echo "  $link -> $src"
+        ln -sfn "$dst" "$link"
+        echo "  $link -> $dst"
     done
 done
 
