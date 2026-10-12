@@ -138,7 +138,7 @@ machine (so a true resume is possible) and **dark red** when it's another one
 and so no recorded hostname; they're attributed to the machine that indexed
 them, since `.jsonl` transcripts are never synced between machines.
 
-The last column, in grey, is the first 8 characters of the session's UUID.
+The last column, in grey, is the first 8 characters of the session's UUID, followed by `...` (e.g. `3f2a91c0...`).
 
 ### `asm reindex` - rebuild the local JSON index
 

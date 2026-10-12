@@ -852,7 +852,7 @@ def format_session_for_fzf(doc: Dict[str, Any], idx_path: str,
     columns = [status_block(doc), title_str, agent_block(doc), host_block(doc)]
     if working_dir:
         columns.append(f"{C_DIR}{working_dir}{RESET}")
-    columns.append(f"{C_UUID}{uuid[:8]}{RESET}")
+    columns.append(f"{C_UUID}{uuid[:8]}...{RESET}")
     display = "  ".join(c for c in columns if c)
 
     snippet = extract_snippet(doc.get("conversation", []), keywords)
