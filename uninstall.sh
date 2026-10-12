@@ -50,17 +50,18 @@ for bin in asm asm-sync status; do
     fi
 done
 
-# -- Remove inject-session skill -------------------------------------------------------
+# -- Remove the skill links (only those pointing into this clone) ------------
 
-if [ -d "$HOME/.claude/skills/inject-session" ]; then
-    rm -rf "$HOME/.claude/skills/inject-session"
-    echo "  Removed ~/.claude/skills/inject-session/"
-fi
-
-if [ -d "$HOME/.codex/skills/inject-session" ]; then
-    rm -rf "$HOME/.codex/skills/inject-session"
-    echo "  Removed ~/.codex/skills/inject-session/"
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for src in "$SCRIPT_DIR"/skills/*/; do
+    src="${src%/}"
+    for link in "$HOME/.claude/skills/$(basename "$src")" "$HOME/.agents/skills/$(basename "$src")"; do
+        if [ -L "$link" ] && [ "$(readlink "$link")" = "$src" ]; then
+            rm "$link"
+            echo "  Removed $link"
+        fi
+    done
+done
 
 # -- Remove info skill ---------------------------------------------------------
 

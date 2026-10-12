@@ -4,7 +4,7 @@
 # Installs ASM from this source checkout to system locations:
 #   ~/opt/agent-session-manager/bin/     - canonical deployment: asm, asm-sync, status
 #   ~/.local/bin/                         - PATH entry points, symlinked into the above
-#   ~/.claude/skills/inject-session/SKILL.md      - /inject-session skill
+#   ~/.claude/skills/inject-session, ~/.agents/skills/inject-session - symlinks to skills/inject-session/
 #   ~/opt/agent-session-manager/         - service scripts + logs (canonical location)
 #   ~/opt/agent-session-manager/data/     - settings, index, lifecycle sidecars, sync log
 #   ~/Library/LaunchAgents/ (macOS) or
@@ -158,16 +158,32 @@ print('true' if m.CODEX_ENABLED else 'false')
 CODEX_PRESENT=false
 [ "$CODEX_ENABLED" = "true" ] && command -v codex &>/dev/null && CODEX_PRESENT=true
 
-# -- inject-session skill -> ~/.claude/skills/inject-session/ (+ ~/.codex/skills/ if Codex) ---
+# -- Skills: each skills/<name>/ symlinked into ~/.claude/skills/ and ~/.agents/skills/, never copied ---
+# An old copy at the link path is replaced only if identical (ignoring *.bak); anything else is kept.
 
-mkdir -p "$HOME/.claude/skills/inject-session"
-cp "$SRC_DIR/inject-session/SKILL.md" "$HOME/.claude/skills/inject-session/SKILL.md"
-echo "  $HOME/.claude/skills/inject-session/SKILL.md"
+for src in "$SCRIPT_DIR"/skills/*/; do
+    src="${src%/}"
+    for home in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+        link="$home/$(basename "$src")"
+        if [ -d "$link" ] && [ ! -L "$link" ]; then
+            if diff -rq -x '*.bak' "$link" "$src" >/dev/null 2>&1; then
+                rm -r "$link"
+            else
+                echo "  WARN: $link is a real folder that differs from $src - kept, not linked"
+                continue
+            fi
+        fi
+        mkdir -p "$home"
+        ln -sfn "$src" "$link"
+        echo "  $link -> $src"
+    done
+done
 
-if $CODEX_PRESENT; then
-    mkdir -p "$HOME/.codex/skills/inject-session"
-    cp "$SRC_DIR/inject-session/SKILL.md" "$HOME/.codex/skills/inject-session/SKILL.md"
-    echo "  $HOME/.codex/skills/inject-session/SKILL.md"
+# -- Clean up the old Codex copy (~/.codex/skills/, replaced by the ~/.agents/skills/ link, 2026-10-12) --
+
+old="$HOME/.codex/skills/inject-session"
+if [ -d "$old" ] && [ ! -L "$old" ] && diff -rq -x '*.bak' "$old" "$SCRIPT_DIR/skills/inject-session" >/dev/null 2>&1; then
+    rm -r "$old" && echo "  removed old copy $old"
 fi
 
 # -- Clean up the old /inject skill (renamed inject-session, 2026-10-11) -----

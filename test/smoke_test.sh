@@ -95,9 +95,9 @@ for f in lifecycle_generation.sh asm-reindex-and-rsync.sh entrypoint.sh install.
     [[ -f "$DEPLOY_DIR/$f" ]] && pass "$DEPLOY_DIR/$f present" || fail "$DEPLOY_DIR/$f missing"
 done
 
-[[ -f "$HOME/.claude/skills/inject-session/SKILL.md" ]] \
-    && pass "/inject-session skill installed" \
-    || fail "~/.claude/skills/inject-session/SKILL.md missing"
+[[ -L "$HOME/.claude/skills/inject-session" && -f "$HOME/.claude/skills/inject-session/SKILL.md" ]] \
+    && pass "/inject-session skill linked" \
+    || fail "~/.claude/skills/inject-session is not a symlink to the skill"
 
 # Drift check: if we're running from a git checkout, compare deployed copies
 # against src/ to catch "edited src/ but forgot to re-run install.sh".
@@ -704,16 +704,15 @@ else
         pass "uninstall removes the marketplace + plugin entries cleanly"
     fi
 
-    # /inject-session skill: install.sh must additionally copy SKILL.md into
-    # ~/.codex/skills/ (a separate directory from Claude's, so no collision)
-    # whenever $CODEX_PRESENT.
-    inject_block=$(sed -n '/^# -- inject-session skill/,/^fi$/p' "$REPO_ROOT/install.sh")
-    run_in_scratch "$inject_block" >/dev/null 2>&1
-    if [[ -f "$LIVE_SCRATCH/.codex/skills/inject-session/SKILL.md" ]] && \
-       [[ -f "$LIVE_SCRATCH/.claude/skills/inject-session/SKILL.md" ]]; then
-        pass "inject skill installed under both ~/.claude/skills/ and ~/.codex/skills/"
+    # Skills: install.sh symlinks each skills/<name>/ into ~/.claude/skills/
+    # and ~/.agents/skills/ (Codex), never copies.
+    skills_block=$(sed -n '/^# -- Skills: each skills/,/^done$/p' "$REPO_ROOT/install.sh")
+    run_in_scratch "SCRIPT_DIR='$REPO_ROOT'; $skills_block" >/dev/null 2>&1
+    if [[ "$(readlink "$LIVE_SCRATCH/.claude/skills/inject-session")" == "$REPO_ROOT/skills/inject-session" ]] && \
+       [[ "$(readlink "$LIVE_SCRATCH/.agents/skills/inject-session")" == "$REPO_ROOT/skills/inject-session" ]]; then
+        pass "inject skill linked from both ~/.claude/skills/ and ~/.agents/skills/"
     else
-        fail "inject skill missing from ~/.claude/skills/ and/or ~/.codex/skills/"
+        fail "inject skill link missing from ~/.claude/skills/ and/or ~/.agents/skills/"
     fi
 
     cleanup_live

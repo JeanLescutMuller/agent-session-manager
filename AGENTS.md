@@ -22,8 +22,6 @@ agent-session-manager/
 │   ├-- entrypoint.sh         # the job for job-runner (separate project): what it runs, its timeout, its summary
 │   ├-- settings.json        # settings template (deploys to ~/opt/agent-session-manager/data/settings.json)
 │   ├-- status               # standalone session info script
-│   ├-- inject-session/              # /inject-session skill - Claude Code and Codex
-│   │   └-- SKILL.md
 │   ├-- lifecycle_generation.sh  # session lifecycle hook (cross-platform, both agents)
 │   ├-- codex-plugin/        # Codex plugin: registers the same lifecycle hooks
 │   │   ├-- .codex-plugin/plugin.json
@@ -82,7 +80,7 @@ pick up a settings.json that already exists.
 | Index | `~/opt/agent-session-manager/data/indexes/` | All |
 | Lifecycle sidecars | `~/opt/agent-session-manager/data/lifecycles/` | All |
 | Sync log | `~/opt/agent-session-manager/data/sync-log.jsonl` | All |
-| `inject-session/SKILL.md` | `~/.claude/skills/inject-session/SKILL.md` and, if Codex is detected, `~/.codex/skills/inject-session/SKILL.md` | All |
+| `skills/inject-session/` (repo root, not `src/`) | symlinks `~/.claude/skills/inject-session` and `~/.agents/skills/inject-session` into this clone | All |
 | `lifecycle_generation.sh`, `asm-reindex-and-rsync.sh`, `entrypoint.sh`, `install.sh`, `uninstall.sh` | `~/opt/agent-session-manager/` | All |
 | Lifecycle hooks (Claude) | `~/.claude/settings.json` (auto-registered) | All |
 | Lifecycle hooks (Codex, if detected) | `codex-plugin/` deployed to `~/opt/agent-session-manager/codex-plugin/`, registered as `asm@asm-local` in `~/.codex/config.toml` via `codex plugin marketplace add` / `codex plugin add` | All |

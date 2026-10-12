@@ -278,7 +278,7 @@ Optionally: confirm by checking whether the PID recorded in the `start` event is
 | `asm-sync` | shell script | trigger 1: backgrounded on `SessionEnd`; trigger 2: opportunistically at the start of `asm resume`; trigger 3: scheduled, as part of `asm-reindex-and-rsync.sh`; always a no-op if no remote configured |
 | `asm-reindex-and-rsync.sh` | shell script | scheduled through job-runner (`entrypoint.sh`) - runs `asm reindex` then unconditionally `asm-sync`, reindex failure never skips the sync step |
 | `asm` | shell script | terminal, before opening the agent (`asm resume`, `asm reindex`, …) |
-| `~/.claude/skills/inject-session/SKILL.md`, `~/.codex/skills/inject-session/SKILL.md` | skill | inside an active Claude Code or Codex session |
+| `~/.claude/skills/inject-session`, `~/.agents/skills/inject-session` (symlinks to `skills/inject-session/`) | skill | inside an active Claude Code or Codex session |
 
 ### R6.2: `asm reindex`
 
@@ -339,7 +339,7 @@ Main entry point for finding and resuming a past session from the terminal.
 
 Skill for context injection when true resume is not possible, identical content installed for both agents.
 
-- Invoked inside an active session via `~/.claude/skills/inject-session/SKILL.md` (Claude Code) or `~/.codex/skills/inject-session/SKILL.md` (Codex, if detected) - Codex triggers skills by name/description match rather than Claude's `/inject-session <arg>` slash-command syntax, so the skill's own instructions describe both invocation styles
+- Invoked inside an active session via `~/.claude/skills/inject-session` (Claude Code) or `~/.agents/skills/inject-session` (Codex), both symlinks to this repo's `skills/inject-session/` - Codex triggers skills by name/description match rather than Claude's `/inject-session <arg>` slash-command syntax, so the skill's own instructions describe both invocation styles
 - **Usage:** `/inject-session <uuid>` (Claude Code) or a plain-text mention of the skill plus the uuid/keywords (Codex), or `/inject-session "<custom title>"` (fuzzy match against index if title provided)
 - Loads the session content from the index and injects it into the current conversation - works the same regardless of whether the target session's `agent_type` is claude or codex, since the index already normalized both into the same conversation shape
 - **Not a true resume:** creates a new `.jsonl` for the current session; the original session history is not extended
@@ -357,7 +357,7 @@ Skill for context injection when true resume is not possible, identical content 
 | `asm-sync` | R6.4: optional SSH-based sync of `~/opt/agent-session-manager/data/indexes/` only, between two machines (agent-agnostic - syncs both backends' index entries identically) |
 | `asm-reindex-and-rsync.sh` | R6.4: scheduled wrapper - `asm reindex` then unconditionally `asm-sync` |
 | `codex-plugin/` (`.codex-plugin/plugin.json` + `hooks/hooks.json`) | R2: Codex plugin manifest, registered as `asm@asm-local` - wires the same `lifecycle_generation.sh` into Codex's `SessionStart`/`SessionEnd` |
-| `~/.claude/skills/inject-session/SKILL.md`, `~/.codex/skills/inject-session/SKILL.md` (if Codex detected) | R6.6: skill for context injection, identical content for both agents |
+| `~/.claude/skills/inject-session`, `~/.agents/skills/inject-session` (symlinks to `skills/inject-session/`) | R6.6: skill for context injection, one file for both agents |
 
 ### Scheduler config
 
