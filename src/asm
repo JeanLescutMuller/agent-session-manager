@@ -134,7 +134,7 @@ def short_host(host: Optional[str]) -> Optional[str]:
 
 
 def machine_name() -> str:
-    """This machine's name: "Machine name" in ~/AGENTS.md (copy it identically)."""
+    """This machine's name: skill "machine-name" (copy it identically)."""
     name = (os.environ.get("JR_MACHINE_NAME") or (
         subprocess.run(["scutil", "--get", "HostName"], capture_output=True, text=True).stdout
         if sys.platform == "darwin" else Path("/etc/hostname").read_text())).strip().split(".")[0]

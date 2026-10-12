@@ -49,7 +49,7 @@ else
 fi
 
 # --- Collect context ---
-# This machine's name: "Machine name" in ~/AGENTS.md (copy it identically); a hook never fails: "?"
+# This machine's name: skill "machine-name" (copy it identically); a hook never fails: "?"
 HOSTNAME_VAL=${JR_MACHINE_NAME:-$(if [ "$(uname)" = Darwin ]; then scutil --get HostName; else cat /etc/hostname; fi 2>/dev/null)} || :
 HOSTNAME_VAL=${HOSTNAME_VAL%%.*}; [[ $HOSTNAME_VAL =~ ^[A-Za-z0-9-]+$ ]] || HOSTNAME_VAL='?'
 WORKING_DIR="${CWD:-$PWD}"
