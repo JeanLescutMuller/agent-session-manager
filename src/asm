@@ -1768,7 +1768,7 @@ EXAMPLES: List[Tuple[str, str, Optional[str]]] = [
     ("resume", "asm resume -v", "with verbose logging"),
     ("resume", "asm resume --uuid 31967223-656d-41a3-8ed3-56dbcc37ef38", "skip search, resume directly"),
     ("close", "asm close", "browse running sessions, close the one you pick"),
-    ("close", "asm close bootstrap-home", "narrow the picker to matches first"),
+    ("close", "asm close my-setup", "narrow the picker to matches first"),
     ("close", "asm close --uuid 69959166-9792-44c3-9ee6-9f87e634a3f5", "skip search, close directly"),
     ("reindex", "asm reindex", None),
     ("reindex", "asm reindex -n 5", "reindex at most 5 sessions"),
